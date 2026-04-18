@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartClicker</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700&display=swap"
+        rel="stylesheet">
+    <script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <div class="main-layout">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="logo">
+                    <span class="logo-icon">S</span>
+                    <h1>SmartClicker</h1>
+                </div>
+                <nav class="nav-menu">
+                    <button class="nav-item active" id="nav-actions">
+                        <span class="icon">📋</span> Actions
+                    </button>
+                    <button class="nav-item" id="nav-record">
+                        <span class="icon">⏺️</span> Record
+                    </button>
+                    <button class="nav-item" id="nav-settings">
+                        <span class="icon">⚙️</span> Settings
+                    </button>
+                </nav>
+                <div class="sidebar-footer">
+                    <button class="btn btn-secondary" id="btn-load">Load Script</button>
+                    <button class="btn btn-secondary" id="btn-save">Save Script</button>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+                <header class="content-header">
+                    <div class="script-info">
+                        <h2 id="script-name">New Script</h2>
+                        <p id="script-description">No description provided.</p>
+                    </div>
+                    <div class="controls">
+                        <button class="btn btn-primary btn-start" id="btn-start">
+                            <span class="icon">▶️</span> Start (Shift+F1)
+                        </button>
+                        <button class="btn btn-danger btn-stop" id="btn-stop" disabled>
+                            <span class="icon">⏹️</span> Stop (Shift+Esc)
+                        </button>
+                    </div>
+                </header>
+
+                <div class="workspace" id="actions-workspace">
+                    <!-- Action Treeview -->
+                    <section class="panel action-list-panel">
+                        <div class="panel-header">
+                            <h3>Action Sequence</h3>
+                        </div>
+                        <div class="treeview-container" id="action-tree">
+                            <!-- Treeview items will be injected here -->
+                        </div>
+                    </section>
+
+                    <!-- Action Details -->
+                    <section class="panel detail-panel" id="detail-panel">
+                        <div class="panel-header">
+                            <h3>Action Details</h3>
+                        </div>
+                        <div class="detail-content" id="detail-content">
+                            <div class="empty-state">
+                                <p>Select an action to view its details</p>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+                
+                <div class="workspace" id="record-workspace" style="display: none;">
+                    <section class="panel record-panel">
+                        <div class="panel-header">
+                            <h3>Record Tools</h3>
+                        </div>
+                        <div class="record-content" style="padding: 20px;">
+                            <div class="form-group" style="margin-bottom: 20px;">
+                                <label for="record-screenshot-mode" style="display: block; margin-bottom: 8px;">Screenshot Mode</label>
+                                <select id="record-screenshot-mode" class="form-control" style="width: 200px; padding: 8px;">
+                                    <option value="Colored">Colored</option>
+                                    <option value="Gray">Gray</option>
+                                    <option value="BlackWhite">BlackWhite</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" id="btn-take-screenshot" style="padding: 10px 20px;">Take Screenshot</button>
+                        </div>
+                    </section>
+                </div>
+            </main>
+        </div>
+
+        <!-- Status Bar -->
+        <footer class="status-bar">
+            <div class="status-info">
+                <span id="mouse-pos">Position: (0, 0)</span>
+            </div>
+            <div class="status-message" id="status-message">Ready</div>
+        </footer>
+    </div>
+
+    <!-- Scripts -->
+    <script src="renderer.js" type="module"></script>
+</body>
+
+</html>
