@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     mouseClick: (button, x, y, holdTime) => ipcRenderer.invoke('mouse-click', button, x, y, holdTime),
     mouseWheel: (amount) => ipcRenderer.invoke('mouse-wheel', amount),
     keypress: (key, modifier) => ipcRenderer.invoke('keypress', key, modifier),
+    writeText: (text) => ipcRenderer.invoke('write-text', text),
     takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
     takeSnip: (mode) => ipcRenderer.invoke('take-snip', mode),
     loadYaml: (filePath) => ipcRenderer.invoke('load-yaml', filePath),

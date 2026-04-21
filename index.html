@@ -95,6 +95,20 @@
                                     <option value="BlackWhite">BlackWhite</option>
                                 </select>
                             </div>
+                            <div class="form-group" style="margin-bottom: 20px;">
+                                <label for="record-threshold-slider" style="display: block; margin-bottom: 8px;">
+                                    Threshold: <span id="record-threshold-value">127</span>
+                                </label>
+                                <input
+                                    id="record-threshold-slider"
+                                    type="range"
+                                    min="1"
+                                    max="254"
+                                    step="1"
+                                    value="127"
+                                    style="width: 260px;"
+                                >
+                            </div>
                             <button class="btn btn-primary" id="btn-take-screenshot" style="padding: 10px 20px;">Take Screenshot</button>
                         </div>
                     </section>

@@ -32,6 +32,8 @@ const recordWorkspace = document.getElementById('record-workspace');
 // Record Tools
 const btnTakeScreenshot = document.getElementById('btn-take-screenshot');
 const recordScreenshotMode = document.getElementById('record-screenshot-mode');
+const recordThresholdSlider = document.getElementById('record-threshold-slider');
+const recordThresholdValue = document.getElementById('record-threshold-value');
 
 // Initialize
 async function init() {
@@ -77,9 +79,32 @@ async function init() {
     }
 
     // Record Event Listeners
+    if (recordThresholdSlider && recordThresholdValue) {
+        const updateThresholdUi = () => {
+            const threshold = Number.parseInt(recordThresholdSlider.value, 10);
+            const safeThreshold = Number.isNaN(threshold) ? 127 : Math.max(1, Math.min(254, threshold));
+            recordThresholdSlider.value = String(safeThreshold);
+            recordThresholdValue.textContent = String(safeThreshold);
+        };
+        recordThresholdSlider.addEventListener('input', updateThresholdUi);
+        updateThresholdUi();
+    }
+
+    if (recordScreenshotMode && recordThresholdSlider && recordThresholdValue) {
+        const updateThresholdEnabledState = () => {
+            const isBlackWhiteMode = recordScreenshotMode.value === ScreenshotMode.BlackWhite;
+            recordThresholdSlider.disabled = !isBlackWhiteMode;
+            recordThresholdValue.style.opacity = isBlackWhiteMode ? '1' : '0.5';
+        };
+        recordScreenshotMode.addEventListener('change', updateThresholdEnabledState);
+        updateThresholdEnabledState();
+    }
+
     if (btnTakeScreenshot) {
         btnTakeScreenshot.addEventListener('click', async () => {
             const mode = recordScreenshotMode ? recordScreenshotMode.value : 'Colored';
+            const thresholdRaw = recordThresholdSlider ? Number.parseInt(recordThresholdSlider.value, 10) : 127;
+            const threshold = Number.isNaN(thresholdRaw) ? 127 : Math.max(1, Math.min(254, thresholdRaw));
             try {
                 // Hide main window so snip tool has clear screen
                 window.electronAPI.minimize();
@@ -113,7 +138,7 @@ async function init() {
                         const gray = new cv.Mat();
                         cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
                         const bw = new cv.Mat();
-                        cv.threshold(gray, bw, 127, 255, cv.THRESH_BINARY);
+                        cv.threshold(gray, bw, threshold - 1, 255, cv.THRESH_BINARY);
                         mat.delete();
                         gray.delete();
                         mat = bw;
@@ -250,6 +275,7 @@ function formatActionLabel(action) {
         case ActionType.MOUSE_CLICK: return `Click: ${action.button} @ (${action.x}, ${action.y})`;
         case ActionType.MOUSE_WHEEL: return `Scroll: ${action.wheel_amount}`;
         case ActionType.KEYPRESS: return `Keypress: ${action.key} ${action.modifier !== 'none' ? '+ ' + action.modifier : ''}`;
+        case ActionType.WRITETEXT: return `Write Text: ${(action.text || '').slice(0, 30)}${(action.text || '').length > 30 ? '...' : ''}`;
         case ActionType.WAIT_FOR_IMAGE: return `Wait Image: ${action.imagePath[0] || '...'}`;
         case ActionType.CLICKIMAGE: return `Click Image: ${action.imagePath[0] || '...'}`;
         case ActionType.GROUP: return `Group: ${action.groupName}`;
@@ -266,6 +292,7 @@ function getActionIcon(type) {
         [ActionType.MOUSE_CLICK]: '👆',
         [ActionType.MOUSE_WHEEL]: '🖱️',
         [ActionType.KEYPRESS]: '⌨️',
+        [ActionType.WRITETEXT]: '📝',
         [ActionType.WAIT_FOR_IMAGE]: '🔍',
         [ActionType.CLICKIMAGE]: '🎯',
         [ActionType.GROUP]: '📁',
@@ -308,6 +335,8 @@ function renderDetailPanel(action) {
     } else if (action.actionType === ActionType.KEYPRESS) {
         addFormField(form, 'Key', action.key, 'text', false, (v) => action.key = v);
         addFormField(form, 'Modifier', action.modifier, 'select', false, (v) => action.modifier = v, ['none', 'ctrl', 'shift', 'alt', 'cmd']);
+    } else if (action.actionType === ActionType.WRITETEXT) {
+        addFormField(form, 'Text', action.text || '', 'textarea', false, (v) => action.text = v);
     } else if (action.actionType === ActionType.NUMBERED_LOOP) {
         addFormField(form, 'Iterations', action.iterations, 'number', false, (v) => action.iterations = parseInt(v));
     } else if (action.imagePath !== undefined) {
@@ -315,6 +344,17 @@ function renderDetailPanel(action) {
     }
     if (action.screenshotMode !== undefined) {
         addFormField(form, 'Screenshot Mode', action.screenshotMode, 'select', false, (v) => action.screenshotMode = v, Object.values(ScreenshotMode));
+        addFormField(
+            form,
+            'Threshold',
+            action.threshold ?? 128,
+            'number',
+            false,
+            (v) => {
+                const parsed = Number.parseInt(v, 10);
+                action.threshold = Number.isNaN(parsed) ? 128 : Math.max(1, Math.min(254, parsed));
+            }
+        );
     }
 
     detailContent.appendChild(form);
@@ -579,6 +619,9 @@ async function executeAction(action) {
         case ActionType.KEYPRESS:
             await window.electronAPI.keypress(action.key, action.modifier);
             break;
+        case ActionType.WRITETEXT:
+            await window.electronAPI.writeText(action.text || '');
+            break;
         case ActionType.CLICKIMAGE:
             await clickImage(action);
             break;
@@ -644,7 +687,7 @@ async function executeWhileConditionLoop(action) {
         // Check condition
         let conditionMet = false;
         if (action.conditionType === "imagepresent") {
-            const pos = await findImageOnScreen(action.conditionValue, 0.8, action.screenshotMode);
+            const pos = await findImageOnScreen(action.conditionValue, 0.8, action.screenshotMode, action.threshold);
             conditionMet = !!pos;
         }
 
@@ -784,8 +827,8 @@ async function loadImageAsMat(relPath) {
     }
 }
 
-async function findImageOnScreen(imagePaths, confidence = 0.8, mode = ScreenshotMode.Colored) {
-    const haystack = await takeScreenshotAsMat(mode);
+async function findImageOnScreen(imagePaths, confidence = 0.8, mode = ScreenshotMode.Colored, threshold = 128) {
+    const haystack = await takeScreenshotAsMat(mode, threshold);
     try {
         for (const relPath of imagePaths) {
             const needle = await loadImageAsMat(relPath);
@@ -817,7 +860,7 @@ async function findImageOnScreen(imagePaths, confidence = 0.8, mode = Screenshot
 
 
 async function clickImage(action) {
-    const pos = await findImageOnScreen(action.imagePath, 0.8, action.screenshotMode);
+    const pos = await findImageOnScreen(action.imagePath, 0.8, action.screenshotMode, action.threshold);
     if (pos && typeof pos.x === 'number' && typeof pos.y === 'number' && !isNaN(pos.x) && !isNaN(pos.y)) {
         await window.electronAPI.mouseClick(action.button || 'left', pos.x, pos.y, action.holdTime_ms);
     } else {
@@ -832,7 +875,7 @@ async function clickAnyImageWhileFound(action) {
     let inum = 1;
     while (inum > 0 && !stopRequested) {
         inum = 0;
-        for await (const pos of findAnyImageOnScreen(action.imagePath, 0.7, action.screenshotMode)) {
+        for await (const pos of findAnyImageOnScreen(action.imagePath, 0.7, action.screenshotMode, action.threshold)) {
             inum += 1;
             if (pos && typeof pos.x === 'number' && typeof pos.y === 'number' && !isNaN(pos.x) && !isNaN(pos.y)) {
                 await window.electronAPI.mouseClick(action.button || 'left', pos.x, pos.y, action.holdTime_ms);
@@ -844,7 +887,7 @@ async function clickAnyImageWhileFound(action) {
 }
 
 async function moveToImageCenter(action) {
-    const pos = await findImageOnScreen(action.imagePath, 0.8, action.screenshotMode);
+    const pos = await findImageOnScreen(action.imagePath, 0.8, action.screenshotMode, action.threshold);
     if (pos) {
         await window.electronAPI.moveMouse(pos.x + (action.offset_x || 0), pos.y + (action.offset_y || 0));
     }
@@ -854,7 +897,7 @@ async function waitForImage(action) {
     const start = Date.now();
     while (true) {
         if (stopRequested) return;
-        const pos = await findImageOnScreen(action.imagePath, 1.0 - action.tolerance, action.screenshotMode);
+        const pos = await findImageOnScreen(action.imagePath, 1.0 - action.tolerance, action.screenshotMode, action.threshold);
         if (pos) return pos;
         if (action.timeout_ms > 0 && (Date.now() - start) > action.timeout_ms) {
             throw new Error("Timeout waiting for image");
@@ -864,8 +907,8 @@ async function waitForImage(action) {
 }
 
 
-async function* findAnyImageOnScreen(imagePaths, confidence = 0.7, mode = ScreenshotMode.Colored) {
-    const haystack = await takeScreenshotAsMat(mode);
+async function* findAnyImageOnScreen(imagePaths, confidence = 0.7, mode = ScreenshotMode.Colored, threshold = 128) {
+    const haystack = await takeScreenshotAsMat(mode, threshold);
     try {
         const paths = Array.isArray(imagePaths) ? imagePaths : [imagePaths];
         for (const relPath of paths) {

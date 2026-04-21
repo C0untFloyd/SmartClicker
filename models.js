@@ -14,6 +14,7 @@ const ActionType = {
     CLICKIMAGE: "clickimage",
     MOUSE_WHEEL: "mousewheel",
     CLICKIMAGE_WHILE_FOUND: "clickimagewhilefound",
+    WRITETEXT: "writetext",
     NUMBERED_LOOP: "numberedloop",
     WHILE_CONDITION_LOOP: "whileconditionloop",
     GROUP: "group"
@@ -120,6 +121,17 @@ class KeypressAction extends ActionBase {
     }
 }
 
+class WriteTextAction extends ActionBase {
+    constructor(data = {}) {
+        super(ActionType.WRITETEXT, data);
+        this.text = data.text || "";
+    }
+
+    toDict() {
+        return { ...super.toDict(), text: this.text };
+    }
+}
+
 class ImageActionBase extends ActionBase {
     constructor(actionType, data = {}) {
         super(actionType, data);
@@ -127,10 +139,16 @@ class ImageActionBase extends ActionBase {
         this.screenshotMode = Object.values(ScreenshotMode).includes(data.screenshotMode)
             ? data.screenshotMode
             : ScreenshotMode.Colored;
+        this.threshold = Number.isFinite(Number(data.threshold))
+            ? Math.max(1, Math.min(254, Number(data.threshold)))
+            : 128;
     }
 
     toDict() {
-        return { ...super.toDict(), imagePath: this.imagePath, screenshotMode: this.screenshotMode };
+        const result = { ...super.toDict(), imagePath: this.imagePath, screenshotMode: this.screenshotMode };
+        // Keep threshold optional in serialized scripts, while still defaulting to 128 in memory.
+        if (this.threshold !== 128) result.threshold = this.threshold;
+        return result;
     }
 }
 
@@ -203,10 +221,13 @@ class WhileConditionLoopAction extends ActionBase {
         this.screenshotMode = Object.values(ScreenshotMode).includes(data.screenshotMode)
             ? data.screenshotMode
             : ScreenshotMode.Colored;
+        this.threshold = Number.isFinite(Number(data.threshold))
+            ? Math.max(1, Math.min(254, Number(data.threshold)))
+            : 128;
     }
 
     toDict() {
-        return {
+        const result = {
             ...super.toDict(),
             conditionType: this.conditionType,
             conditionValue: this.conditionValue,
@@ -215,6 +236,8 @@ class WhileConditionLoopAction extends ActionBase {
             modifier: this.modifier,
             screenshotMode: this.screenshotMode
         };
+        if (this.threshold !== 128) result.threshold = this.threshold;
+        return result;
     }
 }
 
@@ -236,6 +259,7 @@ function actionFromDict(data) {
         case ActionType.MOUSE_CLICK: return new MouseClickAction(data);
         case ActionType.MOUSE_WHEEL: return new MouseWheelAction(data);
         case ActionType.KEYPRESS: return new KeypressAction(data);
+        case ActionType.WRITETEXT: return new WriteTextAction(data);
         case ActionType.CLICKIMAGE: return new ClickImageAction(data);
         case ActionType.CLICKIMAGE_WHILE_FOUND: return new ClickImageWhileFoundAction(data);
         case ActionType.WAIT_FOR_IMAGE: return new WaitForImageAction(data);
@@ -275,6 +299,7 @@ export {
     MouseClickAction,
     MouseWheelAction,
     KeypressAction,
+    WriteTextAction,
     WaitForImageAction,
     MoveToImageCenterAction,
     ClickImageAction,

@@ -1,0 +1,117 @@
+scriptName: "Script for IdleOn Game"
+description: "Gaming Palette"
+loopSpecification:
+  type: "fixedIterations"
+  iterations: 0
+  delayBetweenIterations_ms: 5000
+actions:
+  - actionType: group
+    groupName: Gaming Palette
+    enabled: true
+    childActions:
+      - actionType: clickimage
+        imagePath:
+        - detectimages/idleon/m_codex.png
+      - actionType: clickimage
+        imagePath:
+        - detectimages/idleon/codex_quikref.png
+      - actionType: clickimage
+        imagePath:
+        - detectimages/idleon/quikref_gaming.png
+      - actionType: "numberedloop"
+        iterations: 4
+        delayBetweenIterations_ms: 5000
+        childActions:
+          - actionType: clickimagewhilefound
+            imagePath:
+            - detectimages/idleon/gaming_cactus_2.png
+            - detectimages/idleon/gaming_cactus_3.png
+            - detectimages/idleon/gaming_cactus_4.png
+            screenshotMode: "BlackWhite"
+          - actionType: "whileconditionloop"
+            conditionType: imagepresent
+            conditionValue:
+            - "detectimages/idleon/gaming_ready.png"
+            childActions:
+              - actionType: "clickimage"
+                imagePath: 
+                - "detectimages/idleon/gaming_wood.png"
+              - actionType: "delay"
+                duration_ms: 1000
+              - actionType: "whileconditionloop"
+                conditionType: imagepresent
+                conditionValue:
+                - "detectimages/idleon/gaming_card.png"
+                childActions:
+                  - actionType: "clickimage"
+                    imagePath: 
+                    - "detectimages/idleon/gaming_card.png"
+                  - actionType: "delay"
+                    duration_ms: 1000
+              - actionType: "delay"
+                duration_ms: 2000
+              - actionType: clickimage
+                imagePath:
+                - detectimages/idleon/gaming_harvestall.png
+          - actionType: mouseclick
+            button: left
+            x: 2184
+            y: 278
+          - actionType: clickimage
+            screenshotMode: "BlackWhite"
+            imagePath:
+            - detectimages/idleon/gaming_chem_3.png
+          - actionType: clickimage
+            screenshotMode: "BlackWhite"
+            imagePath:
+            - detectimages/idleon/gaming_chem_4.png
+          - actionType: clickimage
+            imagePath:
+            - detectimages/idleon/gaming_harvestall.png
+      - actionType: keypress
+        key: escape
+  - actionType: group
+    groupName: Move to storage
+    enabled: true
+    childActions:
+      - actionType: clickimage
+        enabled: true
+        imagePath:
+          - detectimages/idleon/m_codex.png
+        holdTime_ms: 0
+      - actionType: delay
+        enabled: true
+        duration_ms: 500
+      - actionType: clickimage
+        enabled: true
+        imagePath:
+          - detectimages/idleon/codex_quikref.png
+        holdTime_ms: 0
+      - actionType: delay
+        enabled: true
+        duration_ms: 500
+      - actionType: clickimage
+        enabled: true
+        imagePath:
+          - detectimages/idleon/quikref_storage.png
+        holdTime_ms: 0
+      - actionType: delay
+        enabled: true
+        duration_ms: 1000
+      - actionType: numberedloop
+        enabled: true
+        childActions:
+          - actionType: clickimage
+            enabled: true
+            imagePath:
+              - detectimages/idleon/storage_deposit_all.png
+            holdTime_ms: 0
+        iterations: 10
+        delayBetweenIterations_ms: 500
+      - actionType: delay
+        enabled: true
+        duration_ms: 1000
+      - actionType: keypress
+        enabled: true
+        key: escape
+        modifier: none

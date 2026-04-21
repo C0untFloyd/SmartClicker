@@ -114,6 +114,10 @@ ipcMain.handle('keypress', async (event, key, modifier) => {
     }
 });
 
+ipcMain.handle('write-text', async (event, text) => {
+    robot.typeString(String(text ?? ""));
+});
+
 
 ipcMain.handle('read-image', async (event, filePath) => {
     // 1. Load the image from disk using Electron's native decoder
