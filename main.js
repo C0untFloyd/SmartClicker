@@ -21,7 +21,8 @@ function createWindow() {
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             nodeIntegration: false,
-            contextIsolation: true
+            contextIsolation: true,
+            backgroundThrottling: false
         },
         title: "SmartClicker JS"
     });
@@ -228,7 +229,17 @@ ipcMain.handle('show-save-dialog', async (event, options) => {
 });
 
 ipcMain.handle('resolve-path', (event, relativePath) => {
-    return path.resolve(rootPath, relativePath);
+    if (path.isAbsolute(relativePath)) return relativePath;
+
+    let targetPath = path.resolve(rootPath, relativePath);
+    if (!fs.existsSync(targetPath) && app.isPackaged) {
+        // Fallback for development/testing where the exe is in dist/win-unpacked or dist/
+        const fallback1 = path.resolve(rootPath, '..', relativePath);
+        const fallback2 = path.resolve(rootPath, '..', '..', relativePath);
+        if (fs.existsSync(fallback1)) return fallback1;
+        if (fs.existsSync(fallback2)) return fallback2;
+    }
+    return targetPath;
 });
 
 ipcMain.handle('read-image2', async (event, filePath) => {
