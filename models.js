@@ -20,6 +20,18 @@ const ActionType = {
     GROUP: "group"
 };
 
+// Action types whose executor walks childActions.
+const ContainerActionTypes = new Set([
+    ActionType.GROUP,
+    ActionType.NUMBERED_LOOP,
+    ActionType.WHILE_CONDITION_LOOP
+]);
+
+function canContainActions(action) {
+    return !!action && ContainerActionTypes.has(action.actionType);
+}
+
+
 const LoopType = {
     FIXED_ITERATIONS: "fixedIterations",
     INFINITE: "infinite"
@@ -179,24 +191,27 @@ class MoveToImageCenterAction extends ImageActionBase {
 class ClickImageAction extends ImageActionBase {
     constructor(data = {}) {
         super(ActionType.CLICKIMAGE, data);
+        this.button = data.button || "left";
         this.holdTime_ms = data.holdTime_ms || 0;
     }
 
     toDict() {
-        return { ...super.toDict(), holdTime_ms: this.holdTime_ms };
+        return { ...super.toDict(), button: this.button, holdTime_ms: this.holdTime_ms };
     }
 }
 
 class ClickImageWhileFoundAction extends ImageActionBase {
     constructor(data = {}) {
         super(ActionType.CLICKIMAGE_WHILE_FOUND, data);
+        this.button = data.button || "left";
         this.holdTime_ms = data.holdTime_ms || 0;
     }
 
     toDict() {
-        return { ...super.toDict(), holdTime_ms: this.holdTime_ms };
+        return { ...super.toDict(), button: this.button, holdTime_ms: this.holdTime_ms };
     }
 }
+
 
 class NumberedLoopAction extends ActionBase {
     constructor(data = {}) {
@@ -271,6 +286,30 @@ function actionFromDict(data) {
     }
 }
 
+/**
+ * Creates a new action with sensible defaults for the editor palette.
+ * imagePath/conditionValue stay empty so the user can fill them in.
+ */
+function createDefaultAction(actionType) {
+    switch (actionType) {
+        case ActionType.DELAY: return new DelayAction({ duration_ms: 1000 });
+        case ActionType.MOVE_TO_POS: return new MoveToPosAction({});
+        case ActionType.MOUSE_CLICK: return new MouseClickAction({ holdTime_ms: 50 });
+        case ActionType.MOUSE_WHEEL: return new MouseWheelAction({ wheel_amount: -120 });
+        case ActionType.KEYPRESS: return new KeypressAction({});
+        case ActionType.WRITETEXT: return new WriteTextAction({});
+        case ActionType.WAIT_FOR_IMAGE: return new WaitForImageAction({ tolerance: 0.1, timeout_ms: 5000 });
+        case ActionType.MOVE_TO_IMAGE_CENTER: return new MoveToImageCenterAction({});
+        case ActionType.CLICKIMAGE: return new ClickImageAction({});
+        case ActionType.CLICKIMAGE_WHILE_FOUND: return new ClickImageWhileFoundAction({});
+        case ActionType.NUMBERED_LOOP: return new NumberedLoopAction({ iterations: 3 });
+        case ActionType.WHILE_CONDITION_LOOP: return new WhileConditionLoopAction({ conditionValue: [] });
+        case ActionType.GROUP: return new GroupAction({ groupName: "Group" });
+        default: throw new Error("Unsupported action type: " + actionType);
+    }
+}
+
+
 class AutomationScript {
     constructor(data = {}) {
         this.scriptName = data.scriptName || "";
@@ -308,5 +347,7 @@ export {
     WhileConditionLoopAction,
     GroupAction,
     AutomationScript,
-    actionFromDict
+    actionFromDict,
+    createDefaultAction,
+    canContainActions
 };

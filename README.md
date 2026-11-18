@@ -5,6 +5,7 @@ SmartClicker is an advanced, automated clicking and screen-interaction applicati
 ## Features
 
 - **Action Sequence Scripting**: Build sequences of automated actions, load existing scripts, or save them for later use.
+- **Inline Action Editor**: Add actions from a categorised palette, configure them in the details panel, reorder with `↑`/`↓`, nest into groups or loops with `→`/`←`, and delete them with `✕`.
 - **Advanced Screen Capturing**: Integrated screen capture tools with multiple processing modes:
   - **Colored**: Standard screenshot capturing.
   - **Grayscale**: Process screenshots via OpenCV into grayscale for easier template matching.
@@ -61,6 +62,12 @@ The output files will be created in the `dist` directory.
 
 1. Launch SmartClicker.
 2. Under the **Actions** tab, define your sequence of events (clicks, wait times, image checks, etc.).
+   - `＋ Add Action` opens the action palette. A new action is inserted after the currently
+     selected action (or appended when nothing is selected).
+   - Hover a row to reveal its controls: `↑`/`↓` reorder it, `→` nests it inside the previous
+     group/loop, `←` moves it back out, and `✕` deletes it.
+   - Select a group or loop and use **Add Child Action** in the details panel to fill it.
+   - Image paths can be added, edited, re-imported and removed directly in the details panel.
 3. Under the **Record** tab, you can take test screenshots to calibrate your image detection settings (Colored, Gray, or Black & White mode).
 4. Save your constructed scripts locally.
 5. Hit `Shift + F1` to start execution, and `Shift + Esc` to abort execution at any time.

@@ -1,5 +1,6 @@
 import {
-    AutomationScript, ActionType, ScreenshotMode, actionFromDict, LoopType
+    AutomationScript, ActionType, ScreenshotMode, LoopType,
+    createDefaultAction, canContainActions
 } from './models.js';
 
 let currentScript = new AutomationScript();
@@ -9,6 +10,28 @@ let selectedAction = null;
 let bufferedImages = new Map();
 let expandedActions = new Set(); // Track which actions are expanded
 let executionPromise = null; // Track the running execution promise
+let paletteTarget = null; // Container that receives the next added action (null = sibling of selection)
+
+// Action types offered by the "Add Action" palette, in display order.
+const ACTION_LIBRARY = [
+    { type: ActionType.MOUSE_CLICK, label: 'Mouse Click', description: 'Click at a screen position', group: 'Pointer' },
+    { type: ActionType.MOVE_TO_POS, label: 'Move To Position', description: 'Move the cursor to coordinates', group: 'Pointer' },
+    { type: ActionType.MOUSE_WHEEL, label: 'Mouse Wheel', description: 'Scroll the wheel up or down', group: 'Pointer' },
+    { type: ActionType.KEYPRESS, label: 'Keypress', description: 'Press a key, optionally with a modifier', group: 'Keyboard' },
+    { type: ActionType.WRITETEXT, label: 'Write Text', description: 'Type a string of text', group: 'Keyboard' },
+    { type: ActionType.CLICKIMAGE, label: 'Click Image', description: 'Find a template on screen and click it', group: 'Vision' },
+    { type: ActionType.CLICKIMAGE_WHILE_FOUND, label: 'Click Image While Found', description: 'Keep clicking matches until none remain', group: 'Vision' },
+    { type: ActionType.WAIT_FOR_IMAGE, label: 'Wait For Image', description: 'Wait until a template appears', group: 'Vision' },
+    { type: ActionType.MOVE_TO_IMAGE_CENTER, label: 'Move To Image Center', description: 'Move the cursor onto a template match', group: 'Vision' },
+    { type: ActionType.DELAY, label: 'Delay', description: 'Pause execution for a set time', group: 'Flow' },
+    { type: ActionType.NUMBERED_LOOP, label: 'Numbered Loop', description: 'Repeat child actions a fixed number of times', group: 'Flow' },
+    { type: ActionType.WHILE_CONDITION_LOOP, label: 'While Condition Loop', description: 'Repeat child actions while an image is present', group: 'Flow' },
+    { type: ActionType.GROUP, label: 'Group', description: 'Container for organising child actions', group: 'Flow' }
+];
+
+const ACTION_GROUPS = ['Pointer', 'Keyboard', 'Vision', 'Flow'];
+const ACTION_LABELS = new Map(ACTION_LIBRARY.map(item => [item.type, item.label]));
+
 
 // UI Elements
 const actionTree = document.getElementById('action-tree');
@@ -21,6 +44,11 @@ const mousePosEl = document.getElementById('mouse-pos');
 const statusMessageEl = document.getElementById('status-message');
 const scriptNameEl = document.getElementById('script-name');
 const scriptDescEl = document.getElementById('script-description');
+
+// Action editing
+const btnAddAction = document.getElementById('btn-add-action');
+const actionPalette = document.getElementById('action-palette');
+
 
 // Nav & Workspaces
 const navActions = document.getElementById('nav-actions');
@@ -56,6 +84,19 @@ async function init() {
     btnStop.addEventListener('click', stopProcess);
     btnLoad.addEventListener('click', loadScript);
     btnSave.addEventListener('click', saveScript);
+
+    // Action palette (add actions)
+    if (btnAddAction) {
+        btnAddAction.addEventListener('click', () => toggleActionPalette());
+    }
+    document.addEventListener('click', (e) => {
+        if (!actionPalette || actionPalette.hidden) return;
+        const clickedAddButton = btnAddAction && btnAddAction.contains(e.target);
+        if (!clickedAddButton && !actionPalette.contains(e.target)) closeActionPalette();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && actionPalette && !actionPalette.hidden) closeActionPalette();
+    });
 
     // Nav Event Listeners
     if (navActions) {
@@ -185,39 +226,66 @@ function updateStatus(msg) {
 // UI Rendering
 function renderActionTree() {
     actionTree.innerHTML = '';
-    currentScript.actions.forEach((action, index) => {
-        const item = createTreeItem(action, index);
-        actionTree.appendChild(item);
-    });
+    if (currentScript.actions.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'tree-empty';
+        empty.textContent = 'No actions yet. Use "＋ Add Action" to build your sequence.';
+        actionTree.appendChild(empty);
+    } else {
+        currentScript.actions.forEach((action) => {
+            actionTree.appendChild(createTreeItem(action, currentScript.actions, null));
+        });
+    }
 
     scriptNameEl.textContent = currentScript.scriptName || "New Script";
     scriptDescEl.textContent = currentScript.description || "No description provided.";
+
+    // Keep the selected row visible after adds/moves
+    const selectedRow = actionTree.querySelector('.treeview-item.selected');
+    if (selectedRow) selectedRow.scrollIntoView({ block: 'nearest' });
 }
 
-function createTreeItem(action, index, parentList = null) {
+function createTreeItem(action, list, parentAction = null) {
     const wrapper = document.createElement('div');
     wrapper.className = 'tree-item-wrapper';
+
+    const index = list.indexOf(action);
+    const hasChildren = Array.isArray(action.childActions) && action.childActions.length > 0;
+    const isExpanded = expandedActions.has(action);
 
     const div = document.createElement('div');
     div.className = `treeview-item ${!action.enabled ? 'disabled' : ''} ${selectedAction === action ? 'selected' : ''}`;
 
-    const hasChildren = action.childActions && action.childActions.length > 0;
+    // Expand/collapse toggle
+    const toggleEl = document.createElement('span');
+    toggleEl.className = 'tree-toggle';
+    toggleEl.textContent = hasChildren ? (isExpanded ? '▼' : '▶') : '▶';
+    if (!hasChildren) toggleEl.style.visibility = 'hidden';
 
-    // Formatting label similar to Python version
-    let label = formatActionLabel(action);
+    // Icon + label (textContent keeps user-provided names safe)
+    const iconEl = document.createElement('span');
+    iconEl.className = 'action-icon';
+    iconEl.textContent = getActionIcon(action.actionType);
 
-    let toggleBtn = '';
-    if (hasChildren) {
-        toggleBtn = `<span class="tree-toggle">▶</span>`;
-    } else {
-        toggleBtn = `<span class="tree-toggle" style="visibility: hidden;">▶</span>`;
-    }
+    const labelEl = document.createElement('span');
+    labelEl.className = 'action-label';
+    labelEl.textContent = formatActionLabel(action);
 
-    div.innerHTML = `
-        ${toggleBtn}
-        <span class="action-icon">${getActionIcon(action.actionType)}</span>
-        <span class="action-label">${label}</span>
-    `;
+    // Row controls
+    const controls = document.createElement('div');
+    controls.className = 'tree-item-actions';
+    controls.appendChild(createRowButton('↑', 'Move up', () => moveAction(action, -1), index <= 0));
+    controls.appendChild(createRowButton('↓', 'Move down', () => moveAction(action, 1), index >= list.length - 1));
+    controls.appendChild(createRowButton(
+        '→', 'Move into previous group/loop', () => indentAction(action),
+        index <= 0 || !canContainActions(list[index - 1])
+    ));
+    controls.appendChild(createRowButton('←', 'Move out of parent group/loop', () => outdentAction(action), !parentAction));
+    const deleteBtn = createRowButton('✕', 'Delete action', () => deleteAction(action));
+    deleteBtn.classList.add('danger');
+    controls.appendChild(deleteBtn);
+
+    div.append(toggleEl, iconEl, labelEl, controls);
 
     div.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -230,23 +298,13 @@ function createTreeItem(action, index, parentList = null) {
         const childrenContainer = document.createElement('div');
         childrenContainer.className = 'tree-children';
         childrenContainer.style.paddingLeft = '20px';
-
-        // Check if this action was previously expanded
-        const isExpanded = expandedActions.has(action);
         childrenContainer.style.display = isExpanded ? 'block' : 'none';
 
-        action.childActions.forEach((child, cIdx) => {
-            childrenContainer.appendChild(createTreeItem(child, cIdx, action.childActions));
+        action.childActions.forEach((child) => {
+            childrenContainer.appendChild(createTreeItem(child, action.childActions, action));
         });
 
         wrapper.appendChild(childrenContainer);
-
-        const toggleEl = div.querySelector('.tree-toggle');
-        // Set initial toggle state
-        if (isExpanded) {
-            toggleEl.textContent = '▼';
-            toggleEl.classList.remove('collapsed');
-        }
 
         toggleEl.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -254,19 +312,33 @@ function createTreeItem(action, index, parentList = null) {
             if (isHidden) {
                 childrenContainer.style.display = 'block';
                 toggleEl.textContent = '▼';
-                toggleEl.classList.remove('collapsed');
-                expandedActions.add(action); // Track expanded state
+                expandedActions.add(action);
             } else {
                 childrenContainer.style.display = 'none';
                 toggleEl.textContent = '▶';
-                toggleEl.classList.add('collapsed');
-                expandedActions.delete(action); // Remove from expanded set
+                expandedActions.delete(action);
             }
         });
     }
 
     return wrapper;
 }
+
+function createRowButton(symbol, title, onClick, disabled = false) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tree-action-btn';
+    btn.textContent = symbol;
+    btn.title = title;
+    btn.tabIndex = -1;
+    btn.disabled = disabled;
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!btn.disabled) onClick();
+    });
+    return btn;
+}
+
 
 function formatActionLabel(action) {
     switch (action.actionType) {
@@ -278,9 +350,14 @@ function formatActionLabel(action) {
         case ActionType.WRITETEXT: return `Write Text: ${(action.text || '').slice(0, 30)}${(action.text || '').length > 30 ? '...' : ''}`;
         case ActionType.WAIT_FOR_IMAGE: return `Wait Image: ${action.imagePath[0] || '...'}`;
         case ActionType.CLICKIMAGE: return `Click Image: ${action.imagePath[0] || '...'}`;
+        case ActionType.CLICKIMAGE_WHILE_FOUND: return `Click While Found: ${action.imagePath[0] || '...'}`;
+        case ActionType.MOVE_TO_IMAGE_CENTER: return `Move To Image: ${action.imagePath[0] || '...'}`;
         case ActionType.GROUP: return `Group: ${action.groupName}`;
         case ActionType.NUMBERED_LOOP: return `Loop for ${action.iterations} times`;
-        case ActionType.WHILE_CONDITION_LOOP: return `Loop while ${action.conditionType} ${action.conditionValue}`;
+        case ActionType.WHILE_CONDITION_LOOP: {
+            const conditionPaths = Array.isArray(action.conditionValue) ? action.conditionValue : [action.conditionValue];
+            return `Loop while image present: ${conditionPaths[0] || '...'}`;
+        }
         default: return action.actionType;
     }
 }
@@ -295,12 +372,259 @@ function getActionIcon(type) {
         [ActionType.WRITETEXT]: '📝',
         [ActionType.WAIT_FOR_IMAGE]: '🔍',
         [ActionType.CLICKIMAGE]: '🎯',
+        [ActionType.CLICKIMAGE_WHILE_FOUND]: '♻️',
+        [ActionType.MOVE_TO_IMAGE_CENTER]: '📍',
         [ActionType.GROUP]: '📁',
         [ActionType.NUMBERED_LOOP]: '🔄',
         [ActionType.WHILE_CONDITION_LOOP]: '🔄'
     };
     return icons[type] || '❓';
 }
+
+// ---------------------------------------------------------------------------
+// Action editing: add / delete / reorder / nest
+// ---------------------------------------------------------------------------
+
+/**
+ * Locates the array that owns `action`, its index in that array, and the
+ * containing action (null at the script root).
+ */
+function findActionParent(action, list = currentScript.actions, parent = null) {
+    if (!Array.isArray(list)) return null;
+    for (let index = 0; index < list.length; index++) {
+        const candidate = list[index];
+        if (candidate === action) return { list, index, parent };
+        const found = findActionParent(action, candidate.childActions, candidate);
+        if (found) return found;
+    }
+    return null;
+}
+
+function countNestedActions(list) {
+    if (!Array.isArray(list)) return 0;
+    return list.reduce((total, action) => total + 1 + countNestedActions(action.childActions), 0);
+}
+
+function forgetExpanded(action) {
+    expandedActions.delete(action);
+    if (Array.isArray(action.childActions)) action.childActions.forEach(forgetExpanded);
+}
+
+function nextGroupName() {
+    let groupCount = 0;
+    const walk = (list) => {
+        list.forEach((action) => {
+            if (action.actionType === ActionType.GROUP) groupCount++;
+            if (Array.isArray(action.childActions)) walk(action.childActions);
+        });
+    };
+    walk(currentScript.actions);
+    return `Group ${groupCount + 1}`;
+}
+
+function addAction(actionType, parentAction = null) {
+    if (!canEditActions()) return;
+    const action = createDefaultAction(actionType);
+
+    if (actionType === ActionType.GROUP) {
+        action.groupName = nextGroupName();
+    }
+
+    if (canContainActions(parentAction)) {
+        if (!Array.isArray(parentAction.childActions)) parentAction.childActions = [];
+        parentAction.childActions.push(action);
+        expandedActions.add(parentAction);
+    } else {
+        const info = selectedAction ? findActionParent(selectedAction) : null;
+        if (info) {
+            info.list.splice(info.index + 1, 0, action);
+        } else {
+            currentScript.actions.push(action);
+        }
+    }
+
+    selectedAction = action;
+    renderActionTree();
+    renderDetailPanel(action);
+    updateStatus(`Added ${ACTION_LABELS.get(actionType) || actionType}`);
+}
+
+function deleteAction(action) {
+    if (!canEditActions()) return;
+    const info = findActionParent(action);
+    if (!info) return;
+
+    const nestedCount = countNestedActions(action.childActions);
+    if (nestedCount > 0) {
+        const name = ACTION_LABELS.get(action.actionType) || action.actionType;
+        const plural = nestedCount === 1 ? '' : 's';
+        if (!confirm(`Delete "${formatActionLabel(action)}"?\n\nThis also removes ${nestedCount} nested action${plural}.`)) return;
+    }
+
+    info.list.splice(info.index, 1);
+    forgetExpanded(action);
+
+    keepSelectionValid();
+    renderActionTree();
+    if (selectedAction) renderDetailPanel(selectedAction);
+    else renderDetailPanelEmpty();
+    updateStatus('Action deleted');
+}
+
+function moveAction(action, delta) {
+    if (!canEditActions()) return;
+    const info = findActionParent(action);
+    if (!info) return;
+
+    const target = info.index + delta;
+    if (target < 0 || target >= info.list.length) return;
+
+    info.list.splice(info.index, 1);
+    info.list.splice(target, 0, action);
+    renderActionTree();
+}
+
+function indentAction(action) {
+    if (!canEditActions()) return;
+    const info = findActionParent(action);
+    if (!info || info.index <= 0) return;
+
+    const previous = info.list[info.index - 1];
+    if (!canContainActions(previous)) {
+        updateStatus('The action above is not a group or loop');
+        return;
+    }
+
+    if (!Array.isArray(previous.childActions)) previous.childActions = [];
+    info.list.splice(info.index, 1);
+    previous.childActions.push(action);
+    expandedActions.add(previous);
+
+    renderActionTree();
+    updateStatus(`Moved into ${ACTION_LABELS.get(previous.actionType) || previous.actionType}`);
+}
+
+function outdentAction(action) {
+    if (!canEditActions()) return;
+    const info = findActionParent(action);
+    if (!info || !info.parent) return;
+
+    const parentInfo = findActionParent(info.parent);
+    if (!parentInfo) return;
+
+    info.list.splice(info.index, 1);
+    parentInfo.list.splice(parentInfo.index + 1, 0, action);
+    renderActionTree();
+    updateStatus('Moved out of container');
+}
+
+function keepSelectionValid() {
+    if (selectedAction && !findActionParent(selectedAction)) {
+        selectedAction = null;
+    }
+}
+
+function canEditActions() {
+    if (isRunning) {
+        updateStatus('Stop the script before editing the action sequence');
+        return false;
+    }
+    return true;
+}
+
+function renderDetailPanelEmpty() {
+    detailContent.innerHTML = '<div class="empty-state"><p>Select an action to view its details</p></div>';
+}
+
+// ---------------------------------------------------------------------------
+// Add-action palette
+// ---------------------------------------------------------------------------
+
+function toggleActionPalette() {
+    if (!actionPalette) return;
+    if (actionPalette.hidden) openActionPalette(null);
+    else closeActionPalette();
+}
+
+function openActionPalette(targetAction = null) {
+    if (!actionPalette) return;
+    if (!canEditActions()) return;
+    paletteTarget = canContainActions(targetAction) ? targetAction : null;
+    buildActionPalette();
+    actionPalette.hidden = false;
+    if (btnAddAction) btnAddAction.classList.add('active');
+}
+
+function closeActionPalette() {
+    if (!actionPalette) return;
+    actionPalette.hidden = true;
+    paletteTarget = null;
+    if (btnAddAction) btnAddAction.classList.remove('active');
+}
+
+function buildActionPalette() {
+    actionPalette.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.className = 'palette-header';
+    if (paletteTarget) {
+        header.textContent = `Add child to ${paletteTarget.groupName || ACTION_LABELS.get(paletteTarget.actionType) || 'container'}`;
+    } else if (selectedAction) {
+        header.textContent = `Add after "${formatActionLabel(selectedAction)}"`;
+    } else {
+        header.textContent = 'Add action to end of sequence';
+    }
+    actionPalette.appendChild(header);
+
+    for (const groupName of ACTION_GROUPS) {
+        const items = ACTION_LIBRARY.filter(item => item.group === groupName);
+        if (items.length === 0) continue;
+
+        const section = document.createElement('div');
+        section.className = 'palette-section';
+
+        const title = document.createElement('div');
+        title.className = 'palette-section-title';
+        title.textContent = groupName;
+        section.appendChild(title);
+
+        for (const item of items) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'palette-item';
+            btn.title = item.description;
+
+            const icon = document.createElement('span');
+            icon.className = 'action-icon';
+            icon.textContent = getActionIcon(item.type);
+
+            const text = document.createElement('span');
+            text.className = 'palette-item-text';
+
+            const label = document.createElement('span');
+            label.className = 'palette-item-label';
+            label.textContent = item.label;
+
+            const description = document.createElement('span');
+            description.className = 'palette-item-desc';
+            description.textContent = item.description;
+
+            text.append(label, description);
+            btn.append(icon, text);
+
+            btn.addEventListener('click', () => {
+                const target = paletteTarget;
+                addAction(item.type, target);
+                closeActionPalette();
+            });
+
+            section.appendChild(btn);
+        }
+
+        actionPalette.appendChild(section);
+    }
+}
+
 
 function selectAction(action) {
     selectedAction = action;
@@ -324,41 +648,97 @@ function renderDetailPanel(action) {
     });
 
     if (action.actionType === ActionType.DELAY) {
-        addFormField(form, 'Duration (ms)', action.duration_ms, 'number', false, (v) => action.duration_ms = parseInt(v));
+        addFormField(form, 'Duration (ms)', action.duration_ms, 'number', false, (v) => action.duration_ms = toInt(v));
     } else if (action.actionType === ActionType.MOVE_TO_POS || action.actionType === ActionType.MOUSE_CLICK) {
-        addFormField(form, 'X', action.x, 'number', false, (v) => action.x = parseInt(v));
-        addFormField(form, 'Y', action.y, 'number', false, (v) => action.y = parseInt(v));
-        if (action.actionType === ActionType.MOUSE_CLICK) {
-            addFormField(form, 'Button', action.button, 'select', false, (v) => action.button = v, ['left', 'right', 'middle']);
-            addFormField(form, 'Hold Time (ms)', action.holdTime_ms, 'number', false, (v) => action.holdTime_ms = parseInt(v));
-        }
+        addFormField(form, 'X', action.x, 'number', false, (v) => action.x = toInt(v));
+        addFormField(form, 'Y', action.y, 'number', false, (v) => action.y = toInt(v));
     } else if (action.actionType === ActionType.KEYPRESS) {
         addFormField(form, 'Key', action.key, 'text', false, (v) => action.key = v);
         addFormField(form, 'Modifier', action.modifier, 'select', false, (v) => action.modifier = v, ['none', 'ctrl', 'shift', 'alt', 'cmd']);
     } else if (action.actionType === ActionType.WRITETEXT) {
         addFormField(form, 'Text', action.text || '', 'textarea', false, (v) => action.text = v);
     } else if (action.actionType === ActionType.NUMBERED_LOOP) {
-        addFormField(form, 'Iterations', action.iterations, 'number', false, (v) => action.iterations = parseInt(v));
-    } else if (action.imagePath !== undefined) {
+        addFormField(form, 'Iterations', action.iterations, 'number', false, (v) => action.iterations = toInt(v, 1));
+    }
+
+    // Vision fields
+    if (action.imagePath !== undefined) {
         addImagePathTable(form, 'Image Paths', action.imagePath, (v) => action.imagePath = v);
+    }
+    if (action.conditionType !== undefined) {
+        addFormField(form, 'Condition Type', action.conditionType, 'select', false, (v) => action.conditionType = v, ['imagepresent']);
+    }
+    if (action.conditionValue !== undefined) {
+        if (!Array.isArray(action.conditionValue)) {
+            action.conditionValue = action.conditionValue ? [action.conditionValue] : [];
+        }
+        addImagePathTable(form, 'Condition Images', action.conditionValue, (v) => action.conditionValue = v);
     }
     if (action.screenshotMode !== undefined) {
         addFormField(form, 'Screenshot Mode', action.screenshotMode, 'select', false, (v) => action.screenshotMode = v, Object.values(ScreenshotMode));
-        addFormField(
-            form,
-            'Threshold',
-            action.threshold ?? 128,
-            'number',
-            false,
-            (v) => {
-                const parsed = Number.parseInt(v, 10);
-                action.threshold = Number.isNaN(parsed) ? 128 : Math.max(1, Math.min(254, parsed));
-            }
-        );
+        addFormField(form, 'Threshold', action.threshold ?? 128, 'number', false, (v) => {
+            action.threshold = Math.max(1, Math.min(254, toInt(v, 128)));
+        });
+    }
+
+    // Timing / pointer options
+    if (action.timeout_ms !== undefined) {
+        addFormField(form, 'Timeout (ms)', action.timeout_ms, 'number', false, (v) => action.timeout_ms = toInt(v));
+    }
+    if (action.tolerance !== undefined) {
+        addFormField(form, 'Tolerance (0-1)', action.tolerance, 'number', false, (v) => action.tolerance = toFloat(v));
+    }
+    if (action.delayBetweenIterations_ms !== undefined) {
+        addFormField(form, 'Delay Between Iterations (ms)', action.delayBetweenIterations_ms, 'number', false, (v) => action.delayBetweenIterations_ms = toInt(v));
+    }
+    if (action.holdTime_ms !== undefined) {
+        addFormField(form, 'Hold Time (ms)', action.holdTime_ms, 'number', false, (v) => action.holdTime_ms = toInt(v));
+    }
+    if (action.button !== undefined) {
+        addFormField(form, 'Button', action.button, 'select', false, (v) => action.button = v, ['left', 'right', 'middle']);
+    }
+    if (action.offset_x !== undefined) {
+        addFormField(form, 'Offset X', action.offset_x, 'number', false, (v) => action.offset_x = toInt(v));
+    }
+    if (action.offset_y !== undefined) {
+        addFormField(form, 'Offset Y', action.offset_y, 'number', false, (v) => action.offset_y = toInt(v));
+    }
+    if (action.wheel_amount !== undefined) {
+        addFormField(form, 'Wheel Amount', action.wheel_amount, 'number', false, (v) => action.wheel_amount = toInt(v));
+    }
+
+    // Containers can grow from the detail panel too
+    if (canContainActions(action)) {
+        const group = document.createElement('div');
+        group.className = 'form-group';
+
+        const addChildBtn = document.createElement('button');
+        addChildBtn.type = 'button';
+        addChildBtn.className = 'btn btn-secondary';
+        addChildBtn.textContent = '＋ Add Child Action';
+        // Keep the click from bubbling to the document-level "close palette" listener.
+        addChildBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openActionPalette(action);
+        });
+
+        group.appendChild(addChildBtn);
+        form.appendChild(group);
     }
 
     detailContent.appendChild(form);
 }
+
+function toInt(value, fallback = 0) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function toFloat(value, fallback = 0) {
+    const parsed = Number.parseFloat(value);
+    return Number.isNaN(parsed) ? fallback : parsed;
+}
+
 
 function addFormField(container, labelText, value, type, readonly = false, onChange = null, options = []) {
     const group = document.createElement('div');
@@ -389,6 +769,7 @@ function addFormField(container, labelText, value, type, readonly = false, onCha
     } else {
         input = document.createElement('input');
         input.type = type;
+        if (type === 'number') input.step = 'any';
         input.value = value;
     }
 
@@ -404,7 +785,7 @@ function addFormField(container, labelText, value, type, readonly = false, onCha
     container.appendChild(group);
 }
 
-async function addImagePathTable(container, labelText, imagePaths, onChange) {
+function addImagePathTable(container, labelText, imagePaths, onChange) {
     const group = document.createElement('div');
     group.className = 'form-group';
 
@@ -412,11 +793,9 @@ async function addImagePathTable(container, labelText, imagePaths, onChange) {
     label.textContent = labelText;
     group.appendChild(label);
 
-    // Create table
     const table = document.createElement('table');
     table.className = 'image-path-table';
 
-    // Create table header
     const thead = document.createElement('thead');
     const headerRow = document.createElement('tr');
     const pathHeader = document.createElement('th');
@@ -424,79 +803,151 @@ async function addImagePathTable(container, labelText, imagePaths, onChange) {
     const thumbnailHeader = document.createElement('th');
     thumbnailHeader.textContent = 'Thumbnail';
     thumbnailHeader.style.width = '80px';
-    headerRow.appendChild(pathHeader);
-    headerRow.appendChild(thumbnailHeader);
+    const removeHeader = document.createElement('th');
+    removeHeader.style.width = '32px';
+    headerRow.append(pathHeader, thumbnailHeader, removeHeader);
     thead.appendChild(headerRow);
     table.appendChild(thead);
 
-    // Create table body
     const tbody = document.createElement('tbody');
-
-    for (const imagePath of imagePaths) {
-        if (!imagePath.trim()) continue;
-
-        const row = document.createElement('tr');
-
-        // Path cell
-        const pathCell = document.createElement('td');
-        pathCell.textContent = imagePath;
-        pathCell.className = 'image-path-cell';
-        row.appendChild(pathCell);
-
-        // Thumbnail cell
-        const thumbnailCell = document.createElement('td');
-        thumbnailCell.className = 'image-thumbnail-cell';
-
-        try {
-            // Resolve the relative path to absolute path
-            const absPath = await window.electronAPI.resolvePath(imagePath);
-
-            // Read the raw BGRA bitmap data
-            const { width, height, data } = await window.electronAPI.readImage(absPath);
-
-            // Create a canvas to convert BGRA to displayable image
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-
-            // Create ImageData from the raw BGRA buffer
-            const imageData = ctx.createImageData(width, height);
-            const uint8Array = new Uint8Array(data);
-
-            // Copy BGRA data to ImageData (which expects RGBA)
-            // Note: Electron's toBitmap() returns BGRA, but canvas expects RGBA
-            for (let i = 0; i < uint8Array.length; i += 4) {
-                imageData.data[i] = uint8Array[i + 2];     // R
-                imageData.data[i + 1] = uint8Array[i + 1]; // G
-                imageData.data[i + 2] = uint8Array[i];     // B
-                imageData.data[i + 3] = uint8Array[i + 3]; // A
-            }
-
-            ctx.putImageData(imageData, 0, 0);
-
-            // Create thumbnail image element
-            const img = document.createElement('img');
-            img.src = canvas.toDataURL();
-            img.className = 'image-thumbnail';
-            img.width = 64;
-            img.height = 64;
-            img.style.objectFit = 'contain';
-            thumbnailCell.appendChild(img);
-        } catch (err) {
-            console.error(`Failed to load thumbnail for ${imagePath}:`, err);
-            thumbnailCell.textContent = '❌';
-            thumbnailCell.style.textAlign = 'center';
-        }
-
-        row.appendChild(thumbnailCell);
-        tbody.appendChild(row);
-    }
-
     table.appendChild(tbody);
     group.appendChild(table);
+
+    const addPathBtn = document.createElement('button');
+    addPathBtn.type = 'button';
+    addPathBtn.className = 'btn btn-secondary btn-sm';
+    addPathBtn.textContent = '＋ Add Image Path';
+    addPathBtn.style.marginTop = '8px';
+    addPathBtn.addEventListener('click', () => {
+        imagePaths.push('');
+        onChange(imagePaths);
+        renderRows(true);
+    });
+    group.appendChild(addPathBtn);
+
+    function renderRows(focusLast = false) {
+        tbody.innerHTML = '';
+
+        if (imagePaths.length === 0) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.colSpan = 3;
+            cell.className = 'image-path-empty';
+            cell.textContent = 'No image paths yet.';
+            row.appendChild(cell);
+            tbody.appendChild(row);
+            return;
+        }
+
+        imagePaths.forEach((imagePath, index) => {
+            const row = document.createElement('tr');
+
+            // Editable path
+            const pathCell = document.createElement('td');
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'image-path-input';
+            input.placeholder = 'detectimages/example.png';
+            input.value = imagePath;
+            input.spellcheck = false;
+            pathCell.appendChild(input);
+            row.appendChild(pathCell);
+
+            // Thumbnail preview
+            const thumbnailCell = document.createElement('td');
+            thumbnailCell.className = 'image-thumbnail-cell';
+            row.appendChild(thumbnailCell);
+            loadThumbnailInto(thumbnailCell, imagePath);
+
+            input.addEventListener('change', () => {
+                imagePaths[index] = input.value.trim();
+                onChange(imagePaths);
+                loadThumbnailInto(thumbnailCell, imagePaths[index]);
+            });
+
+            // Remove
+            const removeCell = document.createElement('td');
+            removeCell.className = 'image-path-remove-cell';
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'tree-action-btn danger';
+            removeBtn.title = 'Remove image path';
+            removeBtn.textContent = '✕';
+            removeBtn.addEventListener('click', () => {
+                imagePaths.splice(index, 1);
+                onChange(imagePaths);
+                renderRows();
+            });
+            removeCell.appendChild(removeBtn);
+            row.appendChild(removeCell);
+
+            tbody.appendChild(row);
+        });
+
+        if (focusLast) {
+            const inputs = tbody.querySelectorAll('.image-path-input');
+            if (inputs.length) inputs[inputs.length - 1].focus();
+        }
+    }
+
+    renderRows();
     container.appendChild(group);
 }
+
+async function loadThumbnailInto(cell, imagePath) {
+    cell.innerHTML = '';
+
+    if (!imagePath || !imagePath.trim()) {
+        cell.textContent = '—';
+        return;
+    }
+
+    try {
+        // Resolve the relative path to absolute path
+        const absPath = await window.electronAPI.resolvePath(imagePath);
+
+        // Read the raw BGRA bitmap data
+        const { width, height, data } = await window.electronAPI.readImage(absPath);
+
+        // The action may have changed/disappeared while awaiting
+        if (!cell.isConnected) return;
+
+        // Create a canvas to convert BGRA to displayable image
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+
+        // Create ImageData from the raw BGRA buffer
+        const imageData = ctx.createImageData(width, height);
+        const uint8Array = new Uint8Array(data);
+
+        // Copy BGRA data to ImageData (which expects RGBA)
+        // Note: Electron's toBitmap() returns BGRA, but canvas expects RGBA
+        for (let i = 0; i < uint8Array.length; i += 4) {
+            imageData.data[i] = uint8Array[i + 2];     // R
+            imageData.data[i + 1] = uint8Array[i + 1]; // G
+            imageData.data[i + 2] = uint8Array[i];     // B
+            imageData.data[i + 3] = uint8Array[i + 3]; // A
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+
+        const img = document.createElement('img');
+        img.src = canvas.toDataURL();
+        img.className = 'image-thumbnail';
+        img.width = 64;
+        img.height = 64;
+        img.style.objectFit = 'contain';
+        cell.appendChild(img);
+    } catch (err) {
+        console.error(`Failed to load thumbnail for ${imagePath}:`, err);
+        if (!cell.isConnected) return;
+        cell.textContent = '❌';
+        cell.style.textAlign = 'center';
+    }
+}
+
 
 // Script Management
 async function loadScript() {
@@ -512,7 +963,10 @@ async function loadScript() {
         const path = result.filePaths[0];
         const data = await window.electronAPI.loadYaml(path);
         currentScript = new AutomationScript(data);
+        selectedAction = null;
+        expandedActions.clear();
         renderActionTree();
+        renderDetailPanelEmpty();
         updateStatus(`Loaded ${currentScript.scriptName}`);
     } catch (err) {
         alert("Failed to load: " + err);
@@ -544,6 +998,8 @@ async function startProcess() {
     stopRequested = false;
     btnStart.disabled = true;
     btnStop.disabled = false;
+    if (btnAddAction) btnAddAction.disabled = true;
+    closeActionPalette();
     updateStatus("Running...");
 
     window.electronAPI.minimize();
@@ -581,6 +1037,7 @@ async function startProcess() {
             stopRequested = false;
             btnStart.disabled = false;
             btnStop.disabled = true;
+            if (btnAddAction) btnAddAction.disabled = false;
             window.electronAPI.restore();
             updateStatus("Stopped");
             executionPromise = null;
