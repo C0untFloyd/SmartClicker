@@ -15,6 +15,7 @@ list and action reference; this document covers how the code actually behaves.
 | Command | What it does |
 |---|---|
 | `npm start` | Run the app (`electron .`) |
+| `npm start -- --script=<path>` | Run the app with a YAML script pre-loaded |
 | `npm run dev` | Same, but with `--remote-debugging-port=9222` for DevTools/VS Code attach |
 | `npm run pack` | Unpacked build to `dist/` (`electron-builder --dir`) |
 | `npm run dist` | NSIS installer + portable exe in `dist/` |
@@ -42,7 +43,11 @@ renderer.js    ~all app logic: action tree editing (add/delete/reorder/nest), de
                script load/save, execution engine, OpenCV pipeline
                (screenshot → mode processing → template match → NMS)
 models.js      Data model: ActionType/ScreenshotMode enums, action classes, AutomationScript,
-               actionFromDict() deserializer, toDict() serializer  (ESM, renderer-only)
+               actionFromDict() deserializer, toDict() serializer, plugin action registry
+               (ESM, renderer-only)
+plugins/       Optional feature modules. Each plugin registers its own action class, editor
+               fields and executor; a script opts in with a top-level `plugins: [id]` list.
+               sushi/ is the Sushi Station bot (pure vision helpers + action + executor).
 style.css      Dark GitHub-ish theme, CSS variables at :root (--bg-color, --accent-primary, …)
 .assets/       Tracked sample script (example_idleon_gamingpalette_deposit.yaml)
 recordings/    Local-only scripts (gitignored, not packaged)
@@ -85,6 +90,10 @@ thin, mostly stateless "OS capabilities" layer. Any new capability that needs No
 must be added as an `ipcMain.handle` in `main.js`, exposed in `preload.js`, and called from
 `renderer.js`.
 
+`--script=<path>` is resolved in main (`resolveStartupScript`, relative to `rootPath`) and
+fetched once by the renderer via the `get-startup-script` IPC, then loaded through the same
+`loadScriptFromPath()` path as the Load button.
+
 Hotkeys: `Shift+F1` → main sends `hotkey-start`; `Shift+Esc` → `hotkey-stop`. The renderer
 subscribes via `onHotkeyStart` / `onHotkeyStop`. The app minimizes itself while running and
 restores in the execution `finally` block.
@@ -113,6 +122,7 @@ Every action accepts `enabled` (default `true`), optional `childActions`, and ha
 | `delay` | `duration_ms` | `setTimeout`, **not** interruptible |
 | `movetopos` | `x`, `y`, `speed` (stored, unused) | `moveMouse` |
 | `mouseclick` | `button`, `x`, `y`, `holdTime_ms` | `mouseClick` / `mouseToggle` |
+| `drag` | `fromX`, `fromY`, `toX`, `toY`, `duration_ms` | `drag-mouse` IPC |
 | `mousewheel` | `wheel_amount` | `scrollMouse(0, amount)` |
 | `keypress` | `key`, `modifier` (`none/ctrl/shift/alt/cmd`) | `keyTap` |
 | `writetext` | `text` | `typeString` |
@@ -123,6 +133,10 @@ Every action accepts `enabled` (default `true`), optional `childActions`, and ha
 | `numberedloop` | `iterations`, `delayBetweenIterations_ms` | `executeNumberedLoop()` |
 | `whileconditionloop` | `conditionType` (`imagepresent` only), `conditionValue`, `screenshotMode`, `threshold`, `timeout_ms`, `tolerance`, `modifier` (all three largely unused) | `executeWhileConditionLoop()` |
 | `group` | `groupName` | inline child walk |
+| `sushistation` | `bannerImage`, `dryRun`, `maxMerges`, `matchThreshold`, `maxFailures`, `cookEnabled`, `maxCooks`, `debugImagePath`, `sortMode`, `sortOnly`, `sortFirst`, `reSortAfterMerge`, `tierAtlasImage`, `tierRadius`, `sortMinGap`, `sortMaxDistance`, `sortMaxSwaps`, `swapVerifyThreshold`, board geometry | `playSushiStation()` (plugin) |
+
+`sushistation` is not built into `models.js`; it is registered by the `sushi` plugin
+(`plugins/sushi/index.js`) and only exists for scripts that declare `plugins: [sushi]`.
 
 For image actions, `imagePath` is always normalized to an **array** of relative paths by
 `ImageActionBase`. Relative paths are resolved against `rootPath` in `main.js`:
@@ -167,8 +181,161 @@ by design (e.g. clearing popups) but is a common source of "app is stuck" report
 
 Coordinates from the match are passed straight to robotjs; the screenshot is captured at
 `display.size * scaleFactor` and robotjs works in physical pixels, so this matches on Windows.
-Only the **primary display** is captured (`sources[0]`, which is not strictly guaranteed to
-be the primary source), so multi-monitor scripts don't work.
+Only the **primary display** is captured (`capturePrimaryScreen()` selects the source whose
+`display_id` matches the primary display, falling back to `sources[0]`), so multi-monitor
+scripts don't work.
+
+---
+
+## Sushi Station bot (plugins/sushi + main.js)
+
+`sushistation` automates the World 7 merge board: find two tiles with the same sushi sprite,
+drag the left one onto the right one, repeat. It does **not** OCR the tier numbers; identical
+sprites are matched by colour signature, so it works at any tier.
+
+This action is provided by the **sushi plugin**. A script must declare it:
+
+```yaml
+plugins: [sushi]
+...
+actions:
+  - actionType: sushistation
+```
+
+Board geometry is calibrated against the **live windowed game** (2000x809 including the
+game's custom title bar), not the borderless screenshot. The wordmark sits at (700, 35) and
+the board starts at (447, 108.4) in that window; `SUSHI_BOARD_DEFAULTS`
+(`plugins/sushi/sushi.js`) holds the values and `SushiStationAction` imports them for its model
+defaults:
+
+- anchor template `detectimages/sushi/station_banner.png` = the "SUSHI STATION" wordmark at
+  (700, 35), 355x40 in the live window. The TIERS toggle is deliberately **not** part of the
+  template because its appearance changes when tier vision is toggled. The old borderless
+  screenshot had the wordmark at (700, 22) and the board at (439, 97.5) with 68.8/68.4 spacing;
+  that template only scores ~0.70 against the live title-bar window, which is why the live crop
+  replaced it.
+- cell (0,0) centre = anchor top-left + `(-253, 73.4)`
+- 12 columns x 8 rows, centre spacing `67.73 x 67.64`, 56x56 sample around each centre
+
+Pipeline (`plugins/sushi/index.js > playSushiStation`):
+
+1. `findImageOnScreen([bannerImage])` locates the wordmark on the full screen (requires cv).
+2. Compute the grid rect, then capture only the board with `take-screenshot-region`
+   (`main.js > capturePrimaryScreen()` + `NativeImage.crop`). If the crop comes back a
+   different size than requested, the board is partially off-screen and the action aborts.
+3. `analyzeBoard` builds a 20x20 RGB signature per cell and classifies empties by
+   `brightRatio < 0.06` or luminance variance `< 2000` (an empty plate is flat).
+4. `findMergePairs` finds all pairs whose RMS signature distance is `<= matchThreshold`
+   (default 8; different tiers are ~80-120, same tier ~0-8) and greedily keeps disjoint pairs.
+5. `chooseNextPair` orients same-row merges left -> right so the surviving tile lets
+   Heat of the East Wind chain into the next column, and prefers targets with a filled right
+   neighbour.
+6. `drag-mouse` (robotjs `mouseToggle` + stepped `moveMouse`) performs the drag; then
+   `verifySushiMerge` re-reads the board for up to ~2.7 s. Success means the source is empty
+   **and** the destination is a sprite different from both old tiles (a slot move would leave
+   the destination equal to the old source). The cursor is parked on the title between drags
+   so hover highlights do not pollute the next scan.
+7. If no pairs remain and `cookEnabled`, it clicks `bannerTL + (cookOffsetX, cookOffsetY)`
+   once per `cookDelay_ms` and re-scans. Cooking is off by default because the click target
+   (fuel panel/tier selector) is not confirmed on every UI layout.
+
+
+`dryRun: true` makes no clicks: it analyses once, writes an annotated PNG to
+`debugImagePath` (default `detectimages/sushi/debug_scan.png`) and logs the pairs. This is the
+calibration path — the debug image shows whether the grid, empties and pairs line up.
+
+`recordings/sushi_station_scan.yaml` (scan only), `sushi_station_test.yaml` (one merge) and
+`sushi_station.yaml` (full run) open the station first. `sushi_station_live_scan.yaml`,
+`sushi_station_live_test.yaml`, `sushi_station_live.yaml`, `sushi_station_live_sort_scan.yaml`
+(no-click sort preview), `sushi_station_live_sort.yaml` (sort + cascade) and
+`sushi_station_live_cascade.yaml` (cascade-only, no re-sort) skip the opening click and are
+meant to be run while the station is already open. All of these are under `recordings/`, hence
+gitignored.
+
+**Do not resize/scale the game window** without re-measuring: signatures and the grid offsets
+are 1:1 pixels. Moving the window is fine because the template anchor is re-located every run.
+Also make sure the in-game **MOVE** toggle is off; if it is on, the first drags move slots and
+verification aborts the action after `maxFailures`.
+
+Dragging one sushi onto a **different** sushi swaps the two tiles; onto an **identical** tier it
+merges. This is the primitive behind `sortMode`:
+
+- `prepareSushiSort` loads `tiers_atlas.png` (an 8x8 grid of the 64 official sprites), builds a
+  tier classifier (`buildTierClassifier`), classifies each cell (`classifyBoardTiers`, sampled at
+  `tierRadius`) and plans a **wrap cascade** (`planWrapCascadeLayout`): a pair tier T with
+  at least three copies (`T, T, T`) followed by the consecutive run `T-1, T-2, ...`, placed in
+  row-major order across row boundaries. The third
+  copy is required because the merged tile becomes `T+1` and the chain starts only at `T`; a
+  missing tier or duplicate stops it. `planWrapCascadeLayout` is the only layout path: it scores
+  every start cell by chain length versus the drags needed and arranges only the selected path,
+  pulling tiles from anywhere, so a layout is a handful of ops instead of a full-board sort. The
+  initial pass sorts only when the planned chain is longer than the best pair already on the
+  board, so a depleted board is not repacked for a 1-2 chain. Ops carry
+  `fromRow/fromCol/toRow/toCol`.
+- `runSushiSortSwaps` executes the ops; `dragAndVerifySortOp` verifies a move (source empty,
+  target occupied) or a swap (tier/signature swap or both cells visibly changed) by
+  re-classifying the cells, with a signature fallback (`swapVerifyThreshold`). Before the first
+  drag the action clicks the wordmark to activate the game, because a drag on an inactive window
+  is consumed by activation.
+- Only different tiers are swapped (identical tiers would merge); an empty target is a move.
+  `sortFirst: false` skips the initial dedicated layout. `reSortAfterMerge` (default true)
+  rebuilds the best row/sequence before a merge, but only when the board does not already offer
+  a natural chain of 4+ tiles; skips avoid dozens of re-layout drags.
+- `planBestCascadeMerge` makes the **later** cell of the pair the target, so the consumed source
+  becomes a gap behind it. `countCascade` is **row-major and exact**: after the merge the result
+  is `T+1`, so the chain requires `T`, `T-1`, `T-2`, ... walking right and wrapping into the next
+  row. It stops at the board end, an empty cell, a gap, or a duplicate (`4,3,3,2,1` stops at the
+  second 3). Only pair tiers up to `SUSHI_MAX_CASCADE_TIER` (54) can cascade; 55+ merges are
+  plain merges. The longest exact chain wins.
+  `maxMerges: 0` keeps merging until no pairs remain; `sortOnly` returns after the layout.
+- The atlas is local working data (gitignored): 8x8 cells of 47x47, tier N at index N-1.
+  `tierRadius` 32 was validated at ~98.6% tier accuracy on the live board; the signature radius
+  28 produced off-by-one tier errors, so the two radii are intentionally separate. A live
+  exact-wrap run did 19 merges in ~200 s with cascades of 5-12 tiles and 1-11-drag re-layouts; an
+  earlier global-sort run reached a 9,541 current combo and a 37.07x permanent multiplier
+  (best 9,654), which the exact reruns keep.
+- Verification is deliberately tolerant: a move succeeds when the source is empty and the target
+  is occupied; a swap succeeds on tier swap, signature swap, or both cells visibly changed. A
+  failed sort op stops that sort pass (`sortingDisabled`), re-reads the board and continues with
+  merges — it never aborts the run. Merge failures still count toward `maxFailures`.
+
+---
+
+## Plugins
+
+Plugins are optional feature modules under `plugins/<id>/index.js`. A script opts in with a
+top-level list; without it the plugin's action type is unknown:
+
+```yaml
+plugins: [sushi]
+actions:
+  - actionType: sushistation
+```
+
+`AutomationScript.plugins` stores the list and `toDict()` writes it back. On load,
+`renderer.js > ensurePlugins()` validates each id (`[a-zA-Z0-9_-]+`), dynamically imports
+`./plugins/<id>/index.js`, and expects the module to call `registerPlugin()` from `models.js`.
+The registry lives in `models.js`:
+- `registerPlugin(plugin)` — stores `{ id, name, actions }`; every action descriptor needs
+  `actionType`, `create(data)` and `createDefault()`.
+- `getPlugin(id)` / `getPluginAction(actionType)` / `listPluginActions()`.
+- `actionFromDict()` and `createDefaultAction()` fall back to `getPluginAction()` for unknown
+  built-in types. An unregistered plugin action makes loading fail with an error naming the
+  `plugins` list.
+
+An action descriptor may also provide:
+- `label`, `description`, `group`, `icon` — used by the palette, tree and `getActionIcon()`.
+- `describe(action)` — tree label; falls back to the raw action type.
+- `renderFields(form, action, ui)` — detail-panel fields. `ui` exposes
+  `addFormField`, `addFormSection`, `toInt`, `toFloat` and `renderTree`.
+- `execute(action, host)` — called by `executeAction()`. `host` is created per run by
+  `createPluginContext()` and exposes `electronAPI`, `cv`, `status`, `log`, `warn`, `sleep`,
+  `stopRequested()` and `findImageOnScreen`. Plugins use those instead of importing renderer
+  internals.
+
+The sushi plugin keeps its action class, editor fields, executor and pure helpers together
+(`plugins/sushi/index.js`, `plugins/sushi/sushi.js`); the core only knows the registry and the
+generic actions.
 
 ---
 
@@ -220,11 +387,19 @@ Escape closes the palette (it does not trigger the `Shift+Esc` stop hotkey).
 3. `README.md` — the action table.
 4. Any sample scripts under `.assets/` if they should demonstrate it.
 
+**Plugin actions** do not touch the `ActionType` enum or the core switch statements. Put the
+action class, defaults, `toDict()`, editor fields and executor in `plugins/<id>/index.js`,
+register it with `registerPlugin()`, and add the plugin id to the scripts that use it. The core
+handles deserialization, the palette entry, tree label/icon, detail-panel hook and execution.
+Keep general-purpose pointer/keyboard/vision/flow actions in the core; only game- or
+feature-specific logic belongs in a plugin.
+
 **Serialization contract:** constructor fields must round-trip through `toDict()` →
 `actionFromDict()`. The detail panel renders fields with explicit `!== undefined` checks on the
 instance (e.g. `timeout_ms`, `tolerance`, `button`, `wheel_amount`, `offset_x/y`,
 `delayBetweenIterations_ms`), so a new property needs an editor line in `renderDetailPanel()` —
-and it only survives a save if `toDict()` includes it and the constructor reads it back.
+and it only survives a save if `toDict()` includes it and the constructor reads it back. Plugin
+classes follow the same rule and `AutomationScript.toDict()` adds the plugin id automatically.
 
 **Style:** match the existing renderer style — direct DOM APIs, `document.createElement`,
 `textContent` for anything derived from a script (never interpolate user text into `innerHTML`),
@@ -306,6 +481,15 @@ user scripts.
    gray/binarized as selected.
 6. `Start` (window minimizes) → verify clicks land; `Shift+Esc` stops and restores the window.
 7. `Save Script` and diff the YAML to confirm the intended fields survived serialization.
+8. Sushi Station: open the station in-game with **MOVE** off and the game window at its usual
+   size, run `recordings/sushi_station_live_scan.yaml`, and inspect
+   `detectimages/sushi/debug_scan.png` (grid boxes + pink pair lines). Then run
+   `recordings/sushi_station_live_test.yaml` (one merge) and `sushi_station_live.yaml` (merges).
+9. Sort mode: run `recordings/sushi_station_live_sort_scan.yaml` (no clicks) and inspect
+   `detectimages/sushi/debug_sort_plan.png` — cyan tier labels and orange swap lines. If the
+   tiers match the game, run `sushi_station_live_sort.yaml` to sort and cascade, or
+   `sushi_station_live_cascade.yaml` to cascade the current layout without re-sorting. With
+   `maxMerges: 0` the action keeps going until no pairs remain.
 
 Always sanity-check any change to `models.js` against a real file under `recordings/` (load →
 save → load) because the serializer is lossy and the YAML shape is the app's public contract.

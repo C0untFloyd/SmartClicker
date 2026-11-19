@@ -12,7 +12,48 @@ const rootPath = app.isPackaged
     ? (process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath))
     : __dirname;
 
+function resolveStartupScript() {
+    const args = process.argv.slice(1);
+    const inline = args.find(arg => arg.startsWith('--script='));
+    let scriptPath = inline ? inline.slice('--script='.length) : null;
+
+    if (!scriptPath) {
+        const index = args.indexOf('--script');
+        if (index >= 0 && args[index + 1]) scriptPath = args[index + 1];
+    }
+
+    if (!scriptPath) return null;
+    return path.isAbsolute(scriptPath) ? scriptPath : path.resolve(rootPath, scriptPath);
+}
+
+const startupScriptPath = resolveStartupScript();
+
+
 let mainWindow;
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function capturePrimaryScreen() {
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.size;
+    const { scaleFactor } = primaryDisplay;
+
+    const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: {
+            width: width * scaleFactor,
+            height: height * scaleFactor
+        }
+    });
+
+    const primaryId = String(primaryDisplay.id);
+    const source = sources.find(s => s.display_id === primaryId) || sources[0];
+    if (!source) {
+        throw new Error('No screen source found');
+    }
+    return source.thumbnail;
+}
+
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -101,6 +142,48 @@ ipcMain.handle('mouse-click', async (event, button, x, y, holdTime) => {
     }
 });
 
+ipcMain.handle('mouse-down', async (event, button) => {
+    const btn = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
+    robot.mouseToggle(true, btn);
+});
+
+ipcMain.handle('mouse-up', async (event, button) => {
+    const btn = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
+    robot.mouseToggle(false, btn);
+});
+
+ipcMain.handle('drag-mouse', async (event, fromX, fromY, toX, toY, durationMs) => {
+    const numeric = [fromX, fromY, toX, toY].map(Number);
+    if (numeric.some(value => !Number.isFinite(value))) {
+        throw new Error(`Invalid drag coordinates: ${fromX},${fromY} -> ${toX},${toY}`);
+    }
+
+    const [x1, y1, x2, y2] = numeric;
+    const duration = Math.max(60, Math.min(3000, Math.round(Number(durationMs) || 350)));
+    const steps = Math.max(10, Math.min(120, Math.round(duration / 15)));
+
+    try {
+        robot.moveMouse(Math.round(x1), Math.round(y1));
+        await delay(50);
+        robot.mouseToggle(true, 'left');
+        await delay(120);
+
+        for (let step = 1; step <= steps; step++) {
+            const t = step / steps;
+            robot.moveMouse(
+                Math.round(x1 + (x2 - x1) * t),
+                Math.round(y1 + (y2 - y1) * t)
+            );
+            await delay(duration / steps);
+        }
+
+        await delay(120);
+    } finally {
+        robot.mouseToggle(false, 'left');
+    }
+});
+
+
 ipcMain.handle('mouse-wheel', async (event, amount) => {
     // robotjs scrollMouse(x, y) where y is vertical
     robot.scrollMouse(0, Math.round(amount));
@@ -141,42 +224,32 @@ ipcMain.handle('read-image', async (event, filePath) => {
 
 
 ipcMain.handle('take-screenshot', async () => {
-    // 1. Get the primary display size to ensure we capture the full resolution
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width, height } = primaryDisplay.size;
-    const { scaleFactor } = primaryDisplay;
-
-    // 2. Capture the screen
-    // We set thumbnailSize to the full screen dimensions. 
-    // If we don't, Electron defaults to a small icon size.
-    const sources = await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: {
-            width: width * scaleFactor,
-            height: height * scaleFactor
-        }
-    });
-
-    // 3. Select the primary screen (usually the first one)
-    // In a multi-monitor setup, you might need to filter by display_id
-    const screenSource = sources[0];
-
-    if (!screenSource) {
-        throw new Error('No screen source found');
-    }
-
-    // 4. Get the NativeImage
-    const image = screenSource.thumbnail;
-
-    // 5. Return Raw Data (Fastest)
-    // Instead of PNG (compressed), we send the raw pixel buffer (BGRA).
-    // This matches the optimized renderer code from the previous step.
+    // Capture the primary display and return the raw BGRA buffer.
+    const image = await capturePrimaryScreen();
     return {
         width: image.getSize().width,
         height: image.getSize().height,
         data: image.toBitmap() // Returns a Buffer of raw pixels
     };
 });
+
+ipcMain.handle('take-screenshot-region', async (event, x, y, width, height) => {
+    const image = await capturePrimaryScreen();
+    const size = image.getSize();
+
+    const rx = Math.max(0, Math.min(size.width - 1, Math.round(Number(x) || 0)));
+    const ry = Math.max(0, Math.min(size.height - 1, Math.round(Number(y) || 0)));
+    const rw = Math.max(1, Math.min(size.width - rx, Math.round(Number(width) || 1)));
+    const rh = Math.max(1, Math.min(size.height - ry, Math.round(Number(height) || 1)));
+
+    const cropped = image.crop({ x: rx, y: ry, width: rw, height: rh });
+    return {
+        width: cropped.getSize().width,
+        height: cropped.getSize().height,
+        data: cropped.toBitmap()
+    };
+});
+
 
 ipcMain.handle('take-snip', async (event, mode) => {
     return new Promise((resolve, reject) => {
@@ -248,6 +321,8 @@ ipcMain.handle('read-image2', async (event, filePath) => {
 });
 
 ipcMain.handle('get-app-path', () => app.getAppPath());
+
+ipcMain.handle('get-startup-script', () => startupScriptPath);
 
 ipcMain.handle('save-file', async (event, filePath, buffer) => {
     fs.writeFileSync(filePath, Buffer.from(buffer));

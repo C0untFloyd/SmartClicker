@@ -1,6 +1,7 @@
 import {
     AutomationScript, ActionType, ScreenshotMode, LoopType,
-    createDefaultAction, canContainActions
+    createDefaultAction, canContainActions,
+    getPlugin, getPluginAction
 } from './models.js';
 
 let currentScript = new AutomationScript();
@@ -17,6 +18,7 @@ const ACTION_LIBRARY = [
     { type: ActionType.MOUSE_CLICK, label: 'Mouse Click', description: 'Click at a screen position', group: 'Pointer' },
     { type: ActionType.MOVE_TO_POS, label: 'Move To Position', description: 'Move the cursor to coordinates', group: 'Pointer' },
     { type: ActionType.MOUSE_WHEEL, label: 'Mouse Wheel', description: 'Scroll the wheel up or down', group: 'Pointer' },
+    { type: ActionType.DRAG, label: 'Mouse Drag', description: 'Press, move and release the mouse', group: 'Pointer' },
     { type: ActionType.KEYPRESS, label: 'Keypress', description: 'Press a key, optionally with a modifier', group: 'Keyboard' },
     { type: ActionType.WRITETEXT, label: 'Write Text', description: 'Type a string of text', group: 'Keyboard' },
     { type: ActionType.CLICKIMAGE, label: 'Click Image', description: 'Find a template on screen and click it', group: 'Vision' },
@@ -29,8 +31,72 @@ const ACTION_LIBRARY = [
     { type: ActionType.GROUP, label: 'Group', description: 'Container for organising child actions', group: 'Flow' }
 ];
 
-const ACTION_GROUPS = ['Pointer', 'Keyboard', 'Vision', 'Flow'];
-const ACTION_LABELS = new Map(ACTION_LIBRARY.map(item => [item.type, item.label]));
+const ACTION_GROUPS = ['Pointer', 'Keyboard', 'Vision', 'Games', 'Flow'];
+
+function actionLabel(actionType) {
+    const item = ACTION_LIBRARY.find(entry => entry.type === actionType);
+    return item ? item.label : actionType;
+}
+
+// ---------------------------------------------------------------------------
+// Optional plugins
+//
+// A script opts into a plugin with a top-level `plugins: [id, ...]` list. The
+// module registers its action descriptors on import; the palette and editor
+// pick them up from the core registry in models.js.
+// ---------------------------------------------------------------------------
+
+const loadedPluginIds = new Set();
+
+async function ensurePlugins(ids) {
+    if (!Array.isArray(ids)) return;
+
+    for (const id of ids) {
+        if (typeof id !== 'string' || !id) continue;
+        if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+            throw new Error(`Invalid plugin id: ${id}`);
+        }
+        if (loadedPluginIds.has(id)) continue;
+
+        await import(`./plugins/${id}/index.js`);
+
+        const plugin = getPlugin(id);
+        if (!plugin) {
+            throw new Error(`Plugin "${id}" did not register itself`);
+        }
+        loadedPluginIds.add(id);
+
+        for (const action of plugin.actions) {
+            if (!ACTION_LIBRARY.some(item => item.type === action.actionType)) {
+                ACTION_LIBRARY.push({
+                    type: action.actionType,
+                    label: action.label || action.actionType,
+                    description: action.description || '',
+                    group: action.group || 'Plugins'
+                });
+            }
+            if (action.group && !ACTION_GROUPS.includes(action.group)) {
+                ACTION_GROUPS.push(action.group);
+            }
+        }
+    }
+}
+
+function createPluginContext() {
+    return {
+        electronAPI: window.electronAPI,
+        cv: typeof cv !== 'undefined' ? cv : null,
+        status: updateStatus,
+        log: (...args) => console.log(...args),
+        warn: (...args) => console.warn(...args),
+        sleep: sleepMs,
+        stopRequested: () => stopRequested,
+        findImageOnScreen
+    };
+}
+
+const sleepMs = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 
 
 // UI Elements
@@ -213,6 +279,17 @@ async function init() {
     window.electronAPI.onHotkeyStop(() => stopProcess());
 
     renderActionTree();
+
+    // Optional --script=<path> startup script (handy for testing/launching a bot).
+    try {
+        const startupScript = await window.electronAPI.getStartupScript();
+        if (startupScript) {
+            await loadScriptFromPath(startupScript);
+        }
+    } catch (err) {
+        console.error('Failed to load startup script:', err);
+        updateStatus('Failed to load startup script');
+    }
 }
 
 function onOpenCvReady() {
@@ -345,6 +422,7 @@ function formatActionLabel(action) {
         case ActionType.DELAY: return `Delay: ${action.duration_ms} ms`;
         case ActionType.MOVE_TO_POS: return `Move To: (${action.x}, ${action.y}) @ ${action.speed}`;
         case ActionType.MOUSE_CLICK: return `Click: ${action.button} @ (${action.x}, ${action.y})`;
+        case ActionType.DRAG: return `Drag: (${action.fromX}, ${action.fromY}) → (${action.toX}, ${action.toY})`;
         case ActionType.MOUSE_WHEEL: return `Scroll: ${action.wheel_amount}`;
         case ActionType.KEYPRESS: return `Keypress: ${action.key} ${action.modifier !== 'none' ? '+ ' + action.modifier : ''}`;
         case ActionType.WRITETEXT: return `Write Text: ${(action.text || '').slice(0, 30)}${(action.text || '').length > 30 ? '...' : ''}`;
@@ -358,7 +436,13 @@ function formatActionLabel(action) {
             const conditionPaths = Array.isArray(action.conditionValue) ? action.conditionValue : [action.conditionValue];
             return `Loop while image present: ${conditionPaths[0] || '...'}`;
         }
-        default: return action.actionType;
+        default: {
+            const pluginAction = getPluginAction(action.actionType);
+            if (pluginAction && typeof pluginAction.describe === 'function') {
+                return pluginAction.describe(action);
+            }
+            return action.actionType;
+        }
     }
 }
 
@@ -367,6 +451,7 @@ function getActionIcon(type) {
         [ActionType.DELAY]: '⏱️',
         [ActionType.MOVE_TO_POS]: '🖱️',
         [ActionType.MOUSE_CLICK]: '👆',
+        [ActionType.DRAG]: '✋',
         [ActionType.MOUSE_WHEEL]: '🖱️',
         [ActionType.KEYPRESS]: '⌨️',
         [ActionType.WRITETEXT]: '📝',
@@ -378,8 +463,11 @@ function getActionIcon(type) {
         [ActionType.NUMBERED_LOOP]: '🔄',
         [ActionType.WHILE_CONDITION_LOOP]: '🔄'
     };
+    const pluginAction = getPluginAction(type);
+    if (pluginAction && pluginAction.icon) return pluginAction.icon;
     return icons[type] || '❓';
 }
+
 
 // ---------------------------------------------------------------------------
 // Action editing: add / delete / reorder / nest
@@ -426,6 +514,11 @@ function addAction(actionType, parentAction = null) {
     if (!canEditActions()) return;
     const action = createDefaultAction(actionType);
 
+    const pluginAction = getPluginAction(actionType);
+    if (pluginAction && !currentScript.plugins.includes(pluginAction.pluginId)) {
+        currentScript.plugins.push(pluginAction.pluginId);
+    }
+
     if (actionType === ActionType.GROUP) {
         action.groupName = nextGroupName();
     }
@@ -446,7 +539,7 @@ function addAction(actionType, parentAction = null) {
     selectedAction = action;
     renderActionTree();
     renderDetailPanel(action);
-    updateStatus(`Added ${ACTION_LABELS.get(actionType) || actionType}`);
+    updateStatus(`Added ${actionLabel(actionType)}`);
 }
 
 function deleteAction(action) {
@@ -456,7 +549,7 @@ function deleteAction(action) {
 
     const nestedCount = countNestedActions(action.childActions);
     if (nestedCount > 0) {
-        const name = ACTION_LABELS.get(action.actionType) || action.actionType;
+        const name = actionLabel(action.actionType);
         const plural = nestedCount === 1 ? '' : 's';
         if (!confirm(`Delete "${formatActionLabel(action)}"?\n\nThis also removes ${nestedCount} nested action${plural}.`)) return;
     }
@@ -501,7 +594,7 @@ function indentAction(action) {
     expandedActions.add(previous);
 
     renderActionTree();
-    updateStatus(`Moved into ${ACTION_LABELS.get(previous.actionType) || previous.actionType}`);
+    updateStatus(`Moved into ${actionLabel(previous.actionType)}`);
 }
 
 function outdentAction(action) {
@@ -568,7 +661,7 @@ function buildActionPalette() {
     const header = document.createElement('div');
     header.className = 'palette-header';
     if (paletteTarget) {
-        header.textContent = `Add child to ${paletteTarget.groupName || ACTION_LABELS.get(paletteTarget.actionType) || 'container'}`;
+        header.textContent = `Add child to ${paletteTarget.groupName || actionLabel(paletteTarget.actionType) || 'container'}`;
     } else if (selectedAction) {
         header.textContent = `Add after "${formatActionLabel(selectedAction)}"`;
     } else {
@@ -659,6 +752,23 @@ function renderDetailPanel(action) {
         addFormField(form, 'Text', action.text || '', 'textarea', false, (v) => action.text = v);
     } else if (action.actionType === ActionType.NUMBERED_LOOP) {
         addFormField(form, 'Iterations', action.iterations, 'number', false, (v) => action.iterations = toInt(v, 1));
+    } else if (action.actionType === ActionType.DRAG) {
+        addFormField(form, 'From X', action.fromX, 'number', false, (v) => action.fromX = toInt(v));
+        addFormField(form, 'From Y', action.fromY, 'number', false, (v) => action.fromY = toInt(v));
+        addFormField(form, 'To X', action.toX, 'number', false, (v) => action.toX = toInt(v));
+        addFormField(form, 'To Y', action.toY, 'number', false, (v) => action.toY = toInt(v));
+        addFormField(form, 'Duration (ms)', action.duration_ms, 'number', false, (v) => action.duration_ms = toInt(v, 350));
+    } else {
+        const pluginAction = getPluginAction(action.actionType);
+        if (pluginAction && typeof pluginAction.renderFields === 'function') {
+            pluginAction.renderFields(form, action, {
+                addFormField,
+                addFormSection,
+                toInt,
+                toFloat,
+                renderTree: renderActionTree
+            });
+        }
     }
 
     // Vision fields
@@ -739,6 +849,12 @@ function toFloat(value, fallback = 0) {
     return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function addFormSection(container, title) {
+    const header = document.createElement('div');
+    header.className = 'form-section-title';
+    header.textContent = title;
+    container.appendChild(header);
+}
 
 function addFormField(container, labelText, value, type, readonly = false, onChange = null, options = []) {
     const group = document.createElement('div');
@@ -950,6 +1066,18 @@ async function loadThumbnailInto(cell, imagePath) {
 
 
 // Script Management
+async function loadScriptFromPath(filePath) {
+    const data = await window.electronAPI.loadYaml(filePath);
+    await ensurePlugins(data.plugins || []);
+    currentScript = new AutomationScript(data);
+    selectedAction = null;
+    expandedActions.clear();
+    closeActionPalette();
+    renderActionTree();
+    renderDetailPanelEmpty();
+    updateStatus(`Loaded ${currentScript.scriptName || filePath}`);
+}
+
 async function loadScript() {
     try {
         const result = await window.electronAPI.showOpenDialog({
@@ -960,14 +1088,7 @@ async function loadScript() {
 
         if (result.canceled || result.filePaths.length === 0) return;
 
-        const path = result.filePaths[0];
-        const data = await window.electronAPI.loadYaml(path);
-        currentScript = new AutomationScript(data);
-        selectedAction = null;
-        expandedActions.clear();
-        renderActionTree();
-        renderDetailPanelEmpty();
-        updateStatus(`Loaded ${currentScript.scriptName}`);
+        await loadScriptFromPath(result.filePaths[0]);
     } catch (err) {
         alert("Failed to load: " + err);
     }
@@ -1030,16 +1151,19 @@ async function startProcess() {
             }
         } catch (err) {
             console.error(err);
+            updateStatus("Error: " + err.message);
             alert("Error during execution: " + err.message);
         } finally {
             // Clean up execution state
+            const wasStopped = stopRequested;
             isRunning = false;
             stopRequested = false;
             btnStart.disabled = false;
             btnStop.disabled = true;
             if (btnAddAction) btnAddAction.disabled = false;
             window.electronAPI.restore();
-            updateStatus("Stopped");
+            if (wasStopped) updateStatus("Stopped");
+            else if (statusMessageEl.textContent === "Running...") updateStatus("Finished");
             executionPromise = null;
         }
     })();
@@ -1069,6 +1193,9 @@ async function executeAction(action) {
             break;
         case ActionType.MOUSE_CLICK:
             await window.electronAPI.mouseClick(action.button, action.x, action.y, action.holdTime_ms);
+            break;
+        case ActionType.DRAG:
+            await window.electronAPI.dragMouse(action.fromX, action.fromY, action.toX, action.toY, action.duration_ms);
             break;
         case ActionType.MOUSE_WHEEL:
             await window.electronAPI.mouseWheel(action.wheel_amount);
@@ -1106,9 +1233,15 @@ async function executeAction(action) {
             await executeWhileConditionLoop(action);
             break;
 
-        default:
+        default: {
+            const pluginAction = getPluginAction(action.actionType);
+            if (pluginAction && typeof pluginAction.execute === 'function') {
+                await pluginAction.execute(action, createPluginContext());
+                break;
+            }
             console.warn(`Unknown action type: ${action.actionType}`);
             break;
+        }
     }
 }
 
@@ -1165,7 +1298,6 @@ async function executeWhileConditionLoop(action) {
         await new Promise(r => setTimeout(r, 100));
     }
 }
-
 
 async function takeScreenshotAsMat(mode = ScreenshotMode.Colored, threshold = 128) {
     // 1. Receive raw pixel data (BGRA) directly

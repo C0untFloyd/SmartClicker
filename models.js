@@ -8,6 +8,7 @@ const ActionType = {
     DELAY: "delay",
     MOVE_TO_POS: "movetopos",
     MOUSE_CLICK: "mouseclick",
+    DRAG: "drag",
     WAIT_FOR_IMAGE: "waitforimage",
     MOVE_TO_IMAGE_CENTER: "movetoimagecenter",
     KEYPRESS: "keypress",
@@ -20,6 +21,7 @@ const ActionType = {
     GROUP: "group"
 };
 
+
 // Action types whose executor walks childActions.
 const ContainerActionTypes = new Set([
     ActionType.GROUP,
@@ -29,6 +31,72 @@ const ContainerActionTypes = new Set([
 
 function canContainActions(action) {
     return !!action && ContainerActionTypes.has(action.actionType);
+}
+
+// ---------------------------------------------------------------------------
+// Plugin registry
+//
+// Plugins are optional ES modules under plugins/<id>/index.js. They register
+// themselves here when the renderer imports them; the script YAML declares
+// which plugins it needs with a top-level `plugins: [id, ...]` list.
+// ---------------------------------------------------------------------------
+
+const pluginRegistry = new Map();
+const pluginActions = new Map();
+
+/**
+ * Registers a plugin and its action descriptors.
+ * A descriptor needs at least { actionType, create, createDefault },
+ * plus optional label/description/group/icon/describe/renderFields/execute.
+ */
+function registerPlugin(plugin) {
+    if (!plugin || typeof plugin.id !== 'string' || !plugin.id) {
+        throw new Error('Plugin is missing an id');
+    }
+    if (!Array.isArray(plugin.actions) || plugin.actions.length === 0) {
+        throw new Error(`Plugin "${plugin.id}" has no actions`);
+    }
+
+    const actions = [];
+    const builtInTypes = new Set(Object.values(ActionType));
+    for (const action of plugin.actions) {
+        if (!action || typeof action.actionType !== 'string' || !action.actionType) {
+            throw new Error(`Plugin "${plugin.id}" has an action without actionType`);
+        }
+        if (builtInTypes.has(action.actionType)) {
+            throw new Error(`Plugin "${plugin.id}" cannot replace built-in action "${action.actionType}"`);
+        }
+        if (typeof action.create !== 'function' || typeof action.createDefault !== 'function') {
+            throw new Error(`Plugin "${plugin.id}" action "${action.actionType}" needs create/createDefault`);
+        }
+        if (pluginActions.has(action.actionType)) {
+            throw new Error(`Action type "${action.actionType}" is already registered`);
+        }
+        const entry = { ...action, pluginId: plugin.id };
+        pluginActions.set(action.actionType, entry);
+        actions.push(entry);
+    }
+
+    const entry = { ...plugin, actions };
+    pluginRegistry.set(plugin.id, entry);
+    return entry;
+}
+
+function getPlugin(id) {
+    return pluginRegistry.get(id) || null;
+}
+
+function getPluginAction(actionType) {
+    return pluginActions.get(actionType) || null;
+}
+
+function listPluginActions() {
+    return [...pluginActions.values()];
+}
+
+function numberOr(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 
@@ -107,6 +175,28 @@ class MouseClickAction extends ActionBase {
 
     toDict() {
         return { ...super.toDict(), button: this.button, x: this.x, y: this.y, holdTime_ms: this.holdTime_ms };
+    }
+}
+
+class DragAction extends ActionBase {
+    constructor(data = {}) {
+        super(ActionType.DRAG, data);
+        this.fromX = numberOr(data.fromX, 0);
+        this.fromY = numberOr(data.fromY, 0);
+        this.toX = numberOr(data.toX, 0);
+        this.toY = numberOr(data.toY, 0);
+        this.duration_ms = numberOr(data.duration_ms, 350);
+    }
+
+    toDict() {
+        return {
+            ...super.toDict(),
+            fromX: this.fromX,
+            fromY: this.fromY,
+            toX: this.toX,
+            toY: this.toY,
+            duration_ms: this.duration_ms
+        };
     }
 }
 
@@ -272,6 +362,7 @@ function actionFromDict(data) {
         case ActionType.DELAY: return new DelayAction(data);
         case ActionType.MOVE_TO_POS: return new MoveToPosAction(data);
         case ActionType.MOUSE_CLICK: return new MouseClickAction(data);
+        case ActionType.DRAG: return new DragAction(data);
         case ActionType.MOUSE_WHEEL: return new MouseWheelAction(data);
         case ActionType.KEYPRESS: return new KeypressAction(data);
         case ActionType.WRITETEXT: return new WriteTextAction(data);
@@ -282,7 +373,14 @@ function actionFromDict(data) {
         case ActionType.NUMBERED_LOOP: return new NumberedLoopAction(data);
         case ActionType.WHILE_CONDITION_LOOP: return new WhileConditionLoopAction(data);
         case ActionType.GROUP: return new GroupAction(data);
-        default: throw new Error("Unsupported action type: " + data.actionType);
+        default: {
+            const pluginAction = getPluginAction(data.actionType);
+            if (pluginAction) return pluginAction.create(data);
+            throw new Error(
+                "Unsupported action type: " + data.actionType +
+                ". If this is a plugin action, add the plugin id to the script's `plugins` list."
+            );
+        }
     }
 }
 
@@ -295,6 +393,7 @@ function createDefaultAction(actionType) {
         case ActionType.DELAY: return new DelayAction({ duration_ms: 1000 });
         case ActionType.MOVE_TO_POS: return new MoveToPosAction({});
         case ActionType.MOUSE_CLICK: return new MouseClickAction({ holdTime_ms: 50 });
+        case ActionType.DRAG: return new DragAction({});
         case ActionType.MOUSE_WHEEL: return new MouseWheelAction({ wheel_amount: -120 });
         case ActionType.KEYPRESS: return new KeypressAction({});
         case ActionType.WRITETEXT: return new WriteTextAction({});
@@ -305,7 +404,11 @@ function createDefaultAction(actionType) {
         case ActionType.NUMBERED_LOOP: return new NumberedLoopAction({ iterations: 3 });
         case ActionType.WHILE_CONDITION_LOOP: return new WhileConditionLoopAction({ conditionValue: [] });
         case ActionType.GROUP: return new GroupAction({ groupName: "Group" });
-        default: throw new Error("Unsupported action type: " + actionType);
+        default: {
+            const pluginAction = getPluginAction(actionType);
+            if (pluginAction) return pluginAction.createDefault();
+            throw new Error("Unsupported action type: " + actionType);
+        }
     }
 }
 
@@ -314,17 +417,34 @@ class AutomationScript {
     constructor(data = {}) {
         this.scriptName = data.scriptName || "";
         this.description = data.description || "";
+        this.plugins = Array.isArray(data.plugins)
+            ? data.plugins.filter(id => typeof id === 'string' && id)
+            : [];
         this.loopSpecification = new LoopSpecification(data.loopSpecification || {});
         this.actions = (data.actions || []).map(a => actionFromDict(a));
     }
 
     toDict() {
-        return {
+        const result = {
             scriptName: this.scriptName,
-            description: this.description,
-            loopSpecification: this.loopSpecification.toDict(),
-            actions: this.actions.map(a => a.toDict())
+            description: this.description
         };
+
+        // Keep the explicit plugin reference even if it was added after load.
+        const plugins = new Set(this.plugins);
+        const collect = (actions) => {
+            for (const action of actions || []) {
+                const descriptor = pluginActions.get(action.actionType);
+                if (descriptor) plugins.add(descriptor.pluginId);
+                if (action.childActions) collect(action.childActions);
+            }
+        };
+        collect(this.actions);
+        if (plugins.size > 0) result.plugins = [...plugins];
+
+        result.loopSpecification = this.loopSpecification.toDict();
+        result.actions = this.actions.map(a => a.toDict());
+        return result;
     }
 }
 
@@ -336,6 +456,7 @@ export {
     DelayAction,
     MoveToPosAction,
     MouseClickAction,
+    DragAction,
     MouseWheelAction,
     KeypressAction,
     WriteTextAction,
@@ -347,7 +468,12 @@ export {
     WhileConditionLoopAction,
     GroupAction,
     AutomationScript,
+    ActionBase,
     actionFromDict,
     createDefaultAction,
-    canContainActions
+    canContainActions,
+    registerPlugin,
+    getPlugin,
+    getPluginAction,
+    listPluginActions
 };
