@@ -6,16 +6,11 @@
  * turns a raw BGRA screenshot of the board into per-cell signatures, groups
  * identical tiles and picks the next pair to merge.
  *
- * Geometry defaults were measured from the live 2000x809 game window
- * (windowed, including the game's custom title bar):
- *   - "SUSHI STATION" wordmark template at (700, 35), size 355x40
- *   - first cell centre at (447, 108.4)
- *   - 12 columns x 8 rows, centre spacing 67.73 x 67.64 px
- *
- * The original borderless 2000x809 screenshot had the same board at
- * (439, 97.5) with spacing 68.8 x 68.4; the title bar shifts/scales the UI
- * slightly. Banner offsets below are relative to the template, so recalibrate
- * them if the window chrome changes.
+ * Geometry defaults were measured from the maximized/fullscreen game window
+ * (3440x1440, including the game's custom title bar):
+ *   - "SUSHI STATION" wordmark template at (1166, 37), size 650x70
+ *   - first cell centre at (754, 166)
+ *   - 12 columns x 8 rows, centre spacing 118.48 x 118.32 px
  *
  * All coordinates in this module are relative to the captured board region
  * unless the field name says otherwise.
@@ -23,16 +18,17 @@
 
 export const SUSHI_BOARD_DEFAULTS = Object.freeze({
     bannerImage: 'detectimages/sushi/station_banner.png',
+    maximizeImage: 'detectimages/sushi/window_maximize.png',
     bannerConfidence: 0.8,
     // Cell (0,0) centre relative to the banner template's top-left corner.
-    bannerOffsetX: -253,
-    bannerOffsetY: 73.4,
+    bannerOffsetX: -412,
+    bannerOffsetY: 129,
     columns: 12,
     rows: 8,
-    cellSpacingX: 67.73,
-    cellSpacingY: 67.64,
+    cellSpacingX: 118.48,
+    cellSpacingY: 118.32,
     // Half-size of the square sampled around each cell centre.
-    cellRadius: 28,
+    cellRadius: 49,
     // Signature resolution (sampleSize x sampleSize pixels).
     sampleSize: 20,
     // Maximum RMS colour distance for two cells to be considered identical.
@@ -45,9 +41,9 @@ export const TIER_ATLAS_DEFAULTS = Object.freeze({
     columns: 8,
     rows: 8,
     cellSize: 47,
-    // Tier matching samples almost the full cell; 32 was validated at 98%+
-    // accuracy on the live 2000x809 board.
-    tierRadius: 32,
+    // Tier matching samples almost the full cell; 56 is the fullscreen
+    // equivalent of the 32px radius validated on the 2000x809 window.
+    tierRadius: 56,
     // A run is only sorted when every tile is classified with this much
     // margin over the runner-up and no worse than maxDistance.
     minGap: 5,

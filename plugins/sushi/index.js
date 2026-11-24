@@ -19,6 +19,7 @@ class SushiStationAction extends ActionBase {
         const defaults = SUSHI_BOARD_DEFAULTS;
 
         this.bannerImage = data.bannerImage || defaults.bannerImage;
+        this.maximizeImage = data.maximizeImage || defaults.maximizeImage;
         this.bannerConfidence = numberOr(data.bannerConfidence, defaults.bannerConfidence);
         this.bannerOffsetX = numberOr(data.bannerOffsetX, defaults.bannerOffsetX);
         this.bannerOffsetY = numberOr(data.bannerOffsetY, defaults.bannerOffsetY);
@@ -56,6 +57,7 @@ class SushiStationAction extends ActionBase {
         return {
             ...super.toDict(),
             bannerImage: this.bannerImage,
+            maximizeImage: this.maximizeImage,
             bannerConfidence: this.bannerConfidence,
             bannerOffsetX: this.bannerOffsetX,
             bannerOffsetY: this.bannerOffsetY,
@@ -101,6 +103,7 @@ function addSushiStationFields(form, action, ui) {
 
     addFormSection(form, 'Sushi Station / Detection');
     addFormField(form, 'Banner Image', action.bannerImage, 'text', false, (v) => action.bannerImage = v.trim());
+    addFormField(form, 'Maximize Icon Image', action.maximizeImage, 'text', false, (v) => action.maximizeImage = v.trim());
     addFormField(form, 'Banner Confidence', action.bannerConfidence, 'number', false, (v) => {
         action.bannerConfidence = Math.max(0.1, Math.min(1, toFloat(v, 0.8)));
     });
@@ -128,7 +131,7 @@ function addSushiStationFields(form, action, ui) {
     addFormField(form, 'Sort Rows First', action.sortFirst, 'checkbox', false, (v) => action.sortFirst = v);
     addFormField(form, 'Re-sort After Merge', action.reSortAfterMerge, 'checkbox', false, (v) => action.reSortAfterMerge = v);
     addFormField(form, 'Tier Atlas Image', action.tierAtlasImage, 'text', false, (v) => action.tierAtlasImage = v.trim());
-    addFormField(form, 'Tier Sample Radius', action.tierRadius, 'number', false, (v) => action.tierRadius = Math.max(8, toInt(v, 32)));
+    addFormField(form, 'Tier Sample Radius', action.tierRadius, 'number', false, (v) => action.tierRadius = Math.max(8, toInt(v, 56)));
     addFormField(form, 'Sort Min Gap', action.sortMinGap, 'number', false, (v) => action.sortMinGap = Math.max(0, toFloat(v, 5)));
     addFormField(form, 'Sort Max Distance', action.sortMaxDistance, 'number', false, (v) => action.sortMaxDistance = Math.max(1, toFloat(v, 60)));
     addFormField(form, 'Max Swaps', action.sortMaxSwaps, 'number', false, (v) => action.sortMaxSwaps = Math.max(0, toInt(v, 40)));
@@ -141,14 +144,14 @@ function addSushiStationFields(form, action, ui) {
     addFormField(form, 'Cook Offset X', action.cookOffsetX, 'number', false, (v) => action.cookOffsetX = toFloat(v));
     addFormField(form, 'Cook Offset Y', action.cookOffsetY, 'number', false, (v) => action.cookOffsetY = toFloat(v));
 
-    addFormSection(form, 'Sushi Station / Board Geometry');
+    addFormSection(form, 'Sushi Station / Board Geometry (fullscreen)');
     addFormField(form, 'Columns', action.columns, 'number', false, (v) => action.columns = Math.max(1, toInt(v, 12)));
     addFormField(form, 'Rows', action.rows, 'number', false, (v) => action.rows = Math.max(1, toInt(v, 8)));
     addFormField(form, 'Banner Offset X', action.bannerOffsetX, 'number', false, (v) => action.bannerOffsetX = toFloat(v));
     addFormField(form, 'Banner Offset Y', action.bannerOffsetY, 'number', false, (v) => action.bannerOffsetY = toFloat(v));
-    addFormField(form, 'Cell Spacing X', action.cellSpacingX, 'number', false, (v) => action.cellSpacingX = toFloat(v, 68.8));
-    addFormField(form, 'Cell Spacing Y', action.cellSpacingY, 'number', false, (v) => action.cellSpacingY = toFloat(v, 68.4));
-    addFormField(form, 'Cell Radius', action.cellRadius, 'number', false, (v) => action.cellRadius = Math.max(8, toInt(v, 30)));
+    addFormField(form, 'Cell Spacing X', action.cellSpacingX, 'number', false, (v) => action.cellSpacingX = toFloat(v, 118.48));
+    addFormField(form, 'Cell Spacing Y', action.cellSpacingY, 'number', false, (v) => action.cellSpacingY = toFloat(v, 118.32));
+    addFormField(form, 'Cell Radius', action.cellRadius, 'number', false, (v) => action.cellRadius = Math.max(8, toInt(v, 49)));
 }
 
 export default registerPlugin({
@@ -187,7 +190,7 @@ async function playSushiStation(action, host) {
         throw new Error(`Sushi Station: could not load the banner template (${bannerPath})`);
     }
 
-    const bannerMatch = await host.findImageOnScreen(
+    let bannerMatch = await host.findImageOnScreen(
         [bannerPath],
         action.bannerConfidence,
         ScreenshotMode.Colored,
@@ -195,52 +198,55 @@ async function playSushiStation(action, host) {
     );
 
     if (!bannerMatch) {
-        throw new Error('Sushi Station UI not found on screen. Open the station and keep the game window fully visible.');
+        const maximized = await ensureWindowMaximized(action, host);
+        if (maximized) {
+            bannerMatch = await host.findImageOnScreen(
+                [bannerPath],
+                action.bannerConfidence,
+                ScreenshotMode.Colored,
+                128
+            );
+        }
     }
+
+    if (!bannerMatch) {
+        throw new Error('Sushi Station UI not found on screen. Open the station and keep the game window visible.');
+    }
+
+    const banner = {
+        left: bannerMatch.x - bannerSize.width / 2,
+        top: bannerMatch.y - bannerSize.height / 2,
+        width: bannerSize.width,
+        height: bannerSize.height,
+        centerX: bannerMatch.x,
+        centerY: bannerMatch.y
+    };
 
     // A click on an inactive game window can be consumed by activation, which
     // would swallow the first synthetic drag. Focus it on the title once.
     if (!action.dryRun) {
         await host.electronAPI.mouseClick(
             'left',
-            Math.round(bannerMatch.x),
-            Math.round(bannerMatch.y),
+            Math.round(banner.centerX),
+            Math.round(banner.centerY),
             60
         );
         await host.sleep(250);
     }
 
-    const bannerLeft = bannerMatch.x - bannerSize.width / 2;
-    const bannerTop = bannerMatch.y - bannerSize.height / 2;
-    const originX = bannerLeft + action.bannerOffsetX;
-    const originY = bannerTop + action.bannerOffsetY;
-
-    const pad = Math.ceil(action.cellRadius) + 6;
-    const regionX = Math.floor(originX - pad);
-    const regionY = Math.floor(originY - pad);
-    const regionW = Math.ceil((action.columns - 1) * action.cellSpacingX + action.cellRadius * 2 + pad * 2);
-    const regionH = Math.ceil((action.rows - 1) * action.cellSpacingY + action.cellRadius * 2 + pad * 2);
+    const board = createBoardGeometry(action, banner);
+    const { regionX, regionY, regionW, regionH } = board;
 
     if (regionX < 0 || regionY < 0) {
         throw new Error('Sushi Station board is partially off-screen');
     }
-
-    const geometry = {
-        columns: action.columns,
-        rows: action.rows,
-        originX: originX - regionX,
-        originY: originY - regionY,
-        cellSpacingX: action.cellSpacingX,
-        cellSpacingY: action.cellSpacingY,
-        cellRadius: action.cellRadius
-    };
 
     const readBoard = async () => {
         const shot = await host.electronAPI.takeScreenshotRegion(regionX, regionY, regionW, regionH);
         if (shot.width !== regionW || shot.height !== regionH) {
             throw new Error('Sushi Station board is partially off-screen');
         }
-        const cells = analyzeBoard(new Uint8Array(shot.data), shot.width, shot.height, geometry);
+        const cells = analyzeBoard(new Uint8Array(shot.data), shot.width, shot.height, board.geometry);
         return { cells, shot };
     };
 
@@ -255,7 +261,7 @@ async function playSushiStation(action, host) {
     let sortClassifier = null;
     let sortingDisabled = false;
     if (action.sortMode) {
-        const prepared = await prepareSushiSort(action, cells, shot, host);
+        const prepared = await prepareSushiSort(action, board, cells, shot, host);
         sortPlan = prepared.plan;
         sortClassifier = prepared.classifier;
 
@@ -278,7 +284,7 @@ async function playSushiStation(action, host) {
         if (action.dryRun) {
             const pairs = findMergePairs(cells, action.matchThreshold);
             await saveSushiDebugImage(
-                shot, cells, pairs, action.debugImagePath, action.cellRadius,
+                shot, cells, pairs, action.debugImagePath, board.cellRadius,
                 prepared.tiers, sortPlan.swaps, host
             );
             return;
@@ -294,7 +300,7 @@ async function playSushiStation(action, host) {
             }
             try {
                 cells = await runSushiSortSwaps(
-                    action, swaps, cells, readBoard, bannerMatch, regionX, regionY, prepared.classifier, host
+                    action, board, swaps, cells, readBoard, prepared.classifier, host
                 );
                 host.status(`Sushi sort done: ${swaps.length} op(s)`);
             } catch (err) {
@@ -319,7 +325,7 @@ async function playSushiStation(action, host) {
 
     if (action.dryRun) {
         const pairs = findMergePairs(cells, action.matchThreshold);
-        await saveSushiDebugImage(shot, cells, pairs, action.debugImagePath, action.cellRadius, null, null, host);
+        await saveSushiDebugImage(shot, cells, pairs, action.debugImagePath, board.cellRadius, null, null, host);
         host.status(`Sushi scan: ${filled} sushi, ${pairs.length} merge pair(s)`);
         console.log('[Sushi] scan result', {
             filled,
@@ -353,7 +359,7 @@ async function playSushiStation(action, host) {
                 read.shot.width,
                 read.shot.height,
                 lastCells,
-                action.tierRadius,
+                board.tierRadius,
                 sortClassifier
             );
 
@@ -391,8 +397,7 @@ async function playSushiStation(action, host) {
                     );
                     try {
                         lastCells = await runSushiSortSwaps(
-                            action, planned.ops, lastCells, readBoard, bannerMatch,
-                            regionX, regionY, sortClassifier, host
+                            action, board, planned.ops, lastCells, readBoard, sortClassifier, host
                         );
 
                         const readAfterSort = await readBoard();
@@ -402,7 +407,7 @@ async function playSushiStation(action, host) {
                             readAfterSort.shot.width,
                             readAfterSort.shot.height,
                             lastCells,
-                            action.tierRadius,
+                            board.tierRadius,
                             sortClassifier
                         );
                     } catch (err) {
@@ -416,7 +421,7 @@ async function playSushiStation(action, host) {
                             readNoSort.shot.width,
                             readNoSort.shot.height,
                             lastCells,
-                            action.tierRadius,
+                            board.tierRadius,
                             sortClassifier
                         );
                     }
@@ -461,8 +466,8 @@ async function playSushiStation(action, host) {
 
                     await host.electronAPI.mouseClick(
                         'left',
-                        Math.round(bannerLeft + action.cookOffsetX),
-                        Math.round(bannerTop + action.cookOffsetY),
+                        Math.round(board.cookX),
+                        Math.round(board.cookY),
                         50
                     );
                     await host.sleep(Math.max(200, action.cookDelay_ms));
@@ -501,8 +506,8 @@ async function playSushiStation(action, host) {
         // Park the cursor on the title so hover highlights do not pollute the
         // signatures we read back from the board.
         await host.electronAPI.moveMouse(
-            Math.round(bannerMatch.x),
-            Math.round(bannerMatch.y)
+            Math.round(board.parkX),
+            Math.round(board.parkY)
         );
         await host.sleep(Math.max(120, action.settle_ms));
 
@@ -531,7 +536,77 @@ async function playSushiStation(action, host) {
     host.status(`Sushi done: ${merges} merge(s)${cooks ? `, ${cooks} cook(s)` : ''}`);
 }
 
-async function prepareSushiSort(action, cells, shot, host) {
+/**
+ * If the fullscreen banner is not found, check whether the IdleOn window is
+ * currently un-maximized and click its title-bar maximize button to bring it to
+ * full screen. When already maximized, the title bar sits at the top of the
+ * screen (y <= 35) and the maximize icon is near the right edge of the primary
+ * display; clicking it again there would restore the window instead.
+ */
+async function ensureWindowMaximized(action, host) {
+    const maximizePath = (action.maximizeImage || '').trim();
+    if (!maximizePath) return false;
+
+    const match = await host.findImageOnScreen(
+        [maximizePath],
+        0.85,
+        ScreenshotMode.Colored,
+        128
+    );
+    if (!match) return false;
+
+    const screenWidth = Math.round((window.screen?.width || 0) * (window.devicePixelRatio || 1));
+    const alreadyAtTopRight = match.y <= 35 && screenWidth > 0 && match.x >= screenWidth - 120;
+    if (alreadyAtTopRight) {
+        return false;
+    }
+
+    host.status('Sushi: maximizing IdleOn window...');
+    await host.electronAPI.mouseClick('left', Math.round(match.x), Math.round(match.y), 60);
+    await host.sleep(900);
+    return true;
+}
+
+function createBoardGeometry(action, banner) {
+    const cellSpacingX = action.cellSpacingX;
+    const cellSpacingY = action.cellSpacingY;
+    const cellRadius = action.cellRadius;
+
+    const originX = banner.left + action.bannerOffsetX;
+    const originY = banner.top + action.bannerOffsetY;
+
+    const pad = Math.ceil(cellRadius) + 6;
+    const regionX = Math.floor(originX - pad);
+    const regionY = Math.floor(originY - pad);
+    const regionW = Math.ceil((action.columns - 1) * cellSpacingX + cellRadius * 2 + pad * 2);
+    const regionH = Math.ceil((action.rows - 1) * cellSpacingY + cellRadius * 2 + pad * 2);
+
+    return {
+        cellSpacingX,
+        cellSpacingY,
+        cellRadius,
+        tierRadius: action.tierRadius,
+        regionX,
+        regionY,
+        regionW,
+        regionH,
+        cookX: banner.left + action.cookOffsetX,
+        cookY: banner.top + action.cookOffsetY,
+        parkX: banner.centerX,
+        parkY: banner.centerY,
+        geometry: {
+            columns: action.columns,
+            rows: action.rows,
+            originX: originX - regionX,
+            originY: originY - regionY,
+            cellSpacingX,
+            cellSpacingY,
+            cellRadius
+        }
+    };
+}
+
+async function prepareSushiSort(action, board, cells, shot, host) {
     const atlasPath = (action.tierAtlasImage || '').trim();
     if (!atlasPath) {
         throw new Error('Sushi Station: no tier atlas configured');
@@ -560,7 +635,7 @@ async function prepareSushiSort(action, cells, shot, host) {
         shot.width,
         shot.height,
         cells,
-        action.tierRadius,
+        board.tierRadius,
         classifier
     );
 
@@ -596,7 +671,7 @@ async function prepareSushiSort(action, cells, shot, host) {
     };
 }
 
-async function runSushiSortSwaps(action, ops, cells, readBoard, bannerMatch, regionX, regionY, classifier, host) {
+async function runSushiSortSwaps(action, board, ops, cells, readBoard, classifier, host) {
     let current = cells;
 
     for (let index = 0; index < ops.length; index++) {
@@ -616,10 +691,10 @@ async function runSushiSortSwaps(action, ops, cells, readBoard, bannerMatch, reg
             throw new Error(`Sushi sort: move ${index + 1} target is not empty`);
         }
 
-        const fromX = regionX + source.centerX;
-        const fromY = regionY + source.centerY;
-        const toX = regionX + target.centerX;
-        const toY = regionY + target.centerY;
+        const fromX = board.regionX + source.centerX;
+        const fromY = board.regionY + source.centerY;
+        const toX = board.regionX + target.centerX;
+        const toY = board.regionY + target.centerY;
         const label = op.type === 'move' ? 'move' : 'swap';
 
         host.status(
@@ -628,13 +703,13 @@ async function runSushiSortSwaps(action, ops, cells, readBoard, bannerMatch, reg
         );
 
         let result = await dragAndVerifySortOp(
-            op, source, target, action, readBoard, bannerMatch,
+            op, source, target, action, board, readBoard,
             fromX, fromY, toX, toY, classifier, host
         );
 
         if (!result.ok) {
             result = await dragAndVerifySortOp(
-                op, source, target, action, readBoard, bannerMatch,
+                op, source, target, action, board, readBoard,
                 fromX, fromY, toX, toY, classifier, host,
                 Math.round(action.dragDuration_ms * 1.6)
             );
@@ -653,7 +728,7 @@ async function runSushiSortSwaps(action, ops, cells, readBoard, bannerMatch, reg
     return current;
 }
 
-async function dragAndVerifySortOp(op, source, target, action, readBoard, bannerMatch, fromX, fromY, toX, toY, classifier, host, durationOverride) {
+async function dragAndVerifySortOp(op, source, target, action, board, readBoard, fromX, fromY, toX, toY, classifier, host, durationOverride) {
     const isMove = op.type === 'move';
     const oldSourceSignature = source.signature;
     const oldTargetSignature = target.signature;
@@ -664,8 +739,8 @@ async function dragAndVerifySortOp(op, source, target, action, readBoard, banner
 
     await host.electronAPI.dragMouse(fromX, fromY, toX, toY, duration);
     await host.electronAPI.moveMouse(
-        Math.round(bannerMatch.x),
-        Math.round(bannerMatch.y)
+        Math.round(board.parkX),
+        Math.round(board.parkY)
     );
     // Sort drags settle quickly; the verification loop below polls until the
     // board updates, so a long pre-read wait only slows the pass down.
@@ -696,7 +771,7 @@ async function dragAndVerifySortOp(op, source, target, action, readBoard, banner
                 read.shot.width,
                 read.shot.height,
                 [currentSource, currentTarget],
-                action.tierRadius,
+                board.tierRadius,
                 classifier
             );
             const sourceTier = classified[0] ? classified[0].tier : null;

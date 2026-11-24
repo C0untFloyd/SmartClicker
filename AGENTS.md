@@ -133,7 +133,7 @@ Every action accepts `enabled` (default `true`), optional `childActions`, and ha
 | `numberedloop` | `iterations`, `delayBetweenIterations_ms` | `executeNumberedLoop()` |
 | `whileconditionloop` | `conditionType` (`imagepresent` only), `conditionValue`, `screenshotMode`, `threshold`, `timeout_ms`, `tolerance`, `modifier` (all three largely unused) | `executeWhileConditionLoop()` |
 | `group` | `groupName` | inline child walk |
-| `sushistation` | `bannerImage`, `dryRun`, `maxMerges`, `matchThreshold`, `maxFailures`, `cookEnabled`, `maxCooks`, `debugImagePath`, `sortMode`, `sortOnly`, `sortFirst`, `reSortAfterMerge`, `tierAtlasImage`, `tierRadius`, `sortMinGap`, `sortMaxDistance`, `sortMaxSwaps`, `swapVerifyThreshold`, board geometry | `playSushiStation()` (plugin) |
+| `sushistation` | `bannerImage`, `maximizeImage`, `dryRun`, `maxMerges`, `matchThreshold`, `maxFailures`, `cookEnabled`, `maxCooks`, `debugImagePath`, `sortMode`, `sortOnly`, `sortFirst`, `reSortAfterMerge`, `tierAtlasImage`, `tierRadius`, `sortMinGap`, `sortMaxDistance`, `sortMaxSwaps`, `swapVerifyThreshold`, board geometry | `playSushiStation()` (plugin) |
 
 `sushistation` is not built into `models.js`; it is registered by the `sushi` plugin
 (`plugins/sushi/index.js`) and only exists for scripts that declare `plugins: [sushi]`.
@@ -202,24 +202,26 @@ actions:
   - actionType: sushistation
 ```
 
-Board geometry is calibrated against the **live windowed game** (2000x809 including the
-game's custom title bar), not the borderless screenshot. The wordmark sits at (700, 35) and
-the board starts at (447, 108.4) in that window; `SUSHI_BOARD_DEFAULTS`
-(`plugins/sushi/sushi.js`) holds the values and `SushiStationAction` imports them for its model
-defaults:
+Board geometry is calibrated against the **maximized/fullscreen game window** (3440x1440 including
+the game's custom title bar). The wordmark sits at (1166, 37) and cell (0,0) is at (754, 166);
+`SUSHI_BOARD_DEFAULTS` (`plugins/sushi/sushi.js`) holds the values and `SushiStationAction`
+imports them for its model defaults:
 
 - anchor template `detectimages/sushi/station_banner.png` = the "SUSHI STATION" wordmark at
-  (700, 35), 355x40 in the live window. The TIERS toggle is deliberately **not** part of the
-  template because its appearance changes when tier vision is toggled. The old borderless
-  screenshot had the wordmark at (700, 22) and the board at (439, 97.5) with 68.8/68.4 spacing;
-  that template only scores ~0.70 against the live title-bar window, which is why the live crop
-  replaced it.
-- cell (0,0) centre = anchor top-left + `(-253, 73.4)`
-- 12 columns x 8 rows, centre spacing `67.73 x 67.64`, 56x56 sample around each centre
+  (1166, 37), 650x70 in the fullscreen window. The TIERS toggle is deliberately **not** part of the
+  template because its appearance changes when tier vision is toggled.
+- maximize template `detectimages/sushi/window_maximize.png` = the maximize icon in IdleOn's
+  custom title bar (28x23). If the fullscreen banner does not match on the first check,
+  `ensureWindowMaximized()` finds this icon and clicks it (unless it is already at the top-right
+  corner of the screen), waits 900 ms for the window to maximize, and re-locates the banner.
+- cell (0,0) centre = anchor top-left + `(-412, 129)`
+- 12 columns x 8 rows, centre spacing `118.48 x 118.32`, `cellRadius: 49`, `tierRadius: 56`
 
 Pipeline (`plugins/sushi/index.js > playSushiStation`):
 
-1. `findImageOnScreen([bannerImage])` locates the wordmark on the full screen (requires cv).
+1. `findImageOnScreen([bannerImage])` locates the fullscreen wordmark (requires cv). If not found,
+   `ensureWindowMaximized()` clicks `maximizeImage` on the title bar to bring IdleOn to fullscreen
+   and retries the banner lookup.
 2. Compute the grid rect, then capture only the board with `take-screenshot-region`
    (`main.js > capturePrimaryScreen()` + `NativeImage.crop`). If the crop comes back a
    different size than requested, the board is partially off-screen and the action aborts.
@@ -252,10 +254,11 @@ calibration path — the debug image shows whether the grid, empties and pairs l
 meant to be run while the station is already open. All of these are under `recordings/`, hence
 gitignored.
 
-**Do not resize/scale the game window** without re-measuring: signatures and the grid offsets
-are 1:1 pixels. Moving the window is fine because the template anchor is re-located every run.
-Also make sure the in-game **MOVE** toggle is off; if it is on, the first drags move slots and
-verification aborts the action after `maxFailures`.
+**Run in fullscreen/maximized mode:** signatures and grid offsets use the static fullscreen
+geometry. If IdleOn is in a smaller window when the action starts, `ensureWindowMaximized()` clicks
+the title-bar maximize button (`detectimages/sushi/window_maximize.png`) automatically before
+scanning. Also make sure the in-game **MOVE** toggle is off; if it is on, the first drags move
+slots and verification aborts the action after `maxFailures`.
 
 Dragging one sushi onto a **different** sushi swaps the two tiles; onto an **identical** tier it
 merges. This is the primitive behind `sortMode`:
